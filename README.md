@@ -13,3 +13,11 @@ The main use-case here is for 2D analysis of thermal bridges and breaks in build
 ## Solar Chimney Natural Ventilation
 
 Currently working on accelerated Lattice Boltzmann Method (LBM) solvers which couple thermal fields with hydrodynamic fields for the purpose of modeling buoyancy driven natural ventilation in buildings, i.e. solar chimneys, or data centers on high floors dumping heat into a ventilation shaft.
+
+## Conjugate Heat Transfer
+
+(NOT YET IMPLEMENTED)
+
+## Integration with CAD
+
+(NOT YET IMPLEMENTED) connection to Rhino/Grasshopper through websockets or HTTP requests
