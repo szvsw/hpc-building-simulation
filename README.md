@@ -10,9 +10,9 @@ Currently working on accelerated Finite Difference Method (FDM) solvers for unst
 
 The main use-case here is for 2D analysis of thermal bridges and breaks in building details/wall constructions.  
 
-## Solar Chimney Natural Ventilation
+## Atria & Solar Chimney Natural Ventilation
 
-Currently working on accelerated Lattice Boltzmann Method (LBM) solvers which couple thermal fields with hydrodynamic fields for the purpose of modeling buoyancy driven natural ventilation in buildings, i.e. solar chimneys, or data centers on high floors dumping heat into a ventilation shaft.
+Currently working on accelerated Lattice Boltzmann Method (LBM) solvers which couple thermal fields with hydrodynamic fields for the purpose of modeling buoyancy driven natural ventilation in buildings, i.e. for solar chimneys and atria, or data centers on high floors dumping heat into a ventilation shaft.
 
 ## Conjugate Heat Transfer
 
