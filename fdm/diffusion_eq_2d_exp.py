@@ -102,7 +102,7 @@ class Solver:
             ]
         )
         for col, row in self.D:
-            if col < 3/8 * self.n:
+            if row < 3/8 * self.n:
                 self.D[col, row] = 0.5*D
 
                 self.mat[col, row] = ti.cast(mat_ids['outer'], ti.i8)
@@ -111,7 +111,7 @@ class Solver:
                 self.cp[col, row] = mat_defs[mat_ids['outer'], 1]
                 self.rho[col, row] = mat_defs[mat_ids['outer'], 2]
                 # self.D[col, row] = mat_diffs[mat_ids['outer']]
-            elif col < 4/8 * self.n:
+            elif row < 4/8 * self.n:
                 self.D[col, row] = 0.1*D
 
                 self.mat[col, row] = ti.cast(mat_ids['concrete'], ti.i8)
@@ -120,8 +120,9 @@ class Solver:
                 self.cp[col, row] = mat_defs[mat_ids['concrete'], 1]
                 self.rho[col, row] = mat_defs[mat_ids['concrete'], 2]
                 # self.D[col, row] = mat_diffs[mat_ids['concrete']]
-            elif col < 5/8 * self.n:
+            elif row < 5/8 * self.n:
                 self.D[col, row] = 0.01*D
+                self.D[col, row] = 0.1*D
 
                 self.mat[col, row] = ti.cast(mat_ids['xps'], ti.i8)
 
@@ -138,7 +139,7 @@ class Solver:
                 self.cp[col, row] = mat_defs[mat_ids['outer'], 1]
                 self.rho[col, row] = mat_defs[mat_ids['outer'], 2]
                 # self.D[col, row] = mat_diffs[mat_ids['outer']]
-            if col >= 3/8*self.n and col <= 5/8*self.n and row > 10/21*self.n and row < 11/21*self.n:
+            if (row >= 3/8*self.n and row <= 5/8*self.n) and ((col > 6/21*self.n and col < 7/21*self.n) or (col > 10/21*self.n and col < 11/21*self.n) or (col > 14/21*self.n and col < 15/21*self.n)):
                 self.D[col, row] = D
 
                 self.mat[col, row] = ti.cast(mat_ids['channel'], ti.i8)
@@ -150,6 +151,8 @@ class Solver:
             gray_scale = (self.D[col, row] - 0.01*D) / (0.99*D)
             self.colors[col+self.n, row] = ti.Vector([mat_colors[self.mat[col, row], 0], mat_colors[self.mat[col, row], 1], mat_colors[self.mat[col, row], 2]])
             self.colors[col+self.n,row+self.n] = ti.Vector([gray_scale, gray_scale, gray_scale])
+
+
         
         # for col, row in self.mat:
         #     self.k[col, row] = mat_defs[int(self.mat[col, row]), 0]
@@ -341,8 +344,8 @@ if __name__ == '__main__':
     n = 2**p
 
     boundary_values = [
-        [1, 0],
         [-1, -1],
+        [1, 0]
     ]
 
     colormap = [
@@ -386,10 +389,13 @@ if __name__ == '__main__':
         # window.save_image(f"./week_5_fd_pde/images_4/{it:05d}.png")
         if it%200 == 0:
             plt.cla()
-            temp = solver.u.to_numpy()
-            temp_col = solver.colors.to_numpy()[:solver.n,:solver.n]
-            plt.imshow(temp_col)
-            plt.contour(X, Y, temp, colors='black', levels=40)
+            u = solver.u.to_numpy()
+            u_col = solver.colors.to_numpy()[:solver.n,:solver.n]
+            plt.imshow(np.clip(np.swapaxes(u_col, 0,1), 0, 1.0))
+            plt.contour(X, Y, np.swapaxes(u,0,1), colors='black', levels=np.arange(273.15 -6,273.15+21,0.25), linewidths=(0.25, 0.25, 0.25, 0.25, 1))
+            ax = plt.gca()
+            ax.invert_yaxis()
+            plt.axis("off")
             plt.draw()
             plt.pause(0.01)
 
