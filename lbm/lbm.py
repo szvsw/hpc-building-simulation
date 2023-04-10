@@ -100,10 +100,10 @@ class LBM_D2Q9_iso:
         # TODO: make list of non-solid indices to prevent allocating compute within solids, i.e. to avoid if self.b_s[x,y] == 0: gates
 
         """The canvas color field"""
-        self.image = ti.Vector.field(3, shape=(self.nx, self.ny), dtype=float)
+        self.image = ti.Vector.field(3, shape=(self.nx, self.ny*2), dtype=float)
 
         """Rendering""" 
-        self.window = ti.ui.Window('LBM Isothermal', res = (self.nx*self.im_scale, self.ny*self.im_scale), pos = (150, 150))
+        self.window = ti.ui.Window('LBM Isothermal', res = (self.nx*self.im_scale, 2*self.ny*self.im_scale), pos = (150, 150))
         self.canvas = self.window.get_canvas()
         self.colormap_field = ti.Vector.field(3, shape=(len(colormap)),  dtype=ti.f32,  )
         for i,color in enumerate(colormap):
@@ -229,14 +229,9 @@ class LBM_D2Q9_iso:
 
     @ti.kernel
     def update_im(self):
-        for x,y in self.image:
-            if self.b_s[x,y] == 0:
-                # left  = self.u[ (x - 1 + self.nx) % self.nx, y].y
-                # right = self.u[ (x + 1 + self.nx) % self.nx, y].y
-                # down  = self.u[ x, (y - 1 + self.ny) % self.ny].x
-                # up    = self.u[ x, (y + 1 + self.ny) % self.ny].x
-                # vorticity = ((right-left)-(up-down))
-                # h = vorticity*50 + 0.5
+        for x,y in self.u_cache:
+            if self.b_s[x,y % self.ny] == 0:
+                """Velocity"""
                 h = ti.sqrt(self.u_cache[x,y][3])*7.5
                 
                 level = ti.max(ti.min(ti.floor(h*(self.colormap_field.shape[0]-1)),self.colormap_field.shape[0]-2), 0)
@@ -246,8 +241,24 @@ class LBM_D2Q9_iso:
                 self.image[x,y].r = ti.cast((self.colormap_field[level_idx].x * (1-colorphase) + colorphase*self.colormap_field[level_idx+1].x)/255, ti.float32)
                 self.image[x,y].g = ti.cast((self.colormap_field[level_idx].y * (1-colorphase) + colorphase*self.colormap_field[level_idx+1].y)/255, ti.float32)
                 self.image[x,y].b = ti.cast((self.colormap_field[level_idx].z * (1-colorphase) + colorphase*self.colormap_field[level_idx+1].z)/255, ti.float32)
+
+                """Vorticity"""
+                left  = self.u[ (x - 1 + self.nx) % self.nx, y].y
+                right = self.u[ (x + 1 + self.nx) % self.nx, y].y
+                down  = self.u[ x, (y - 1 + self.ny) % self.ny].x
+                up    = self.u[ x, (y + 1 + self.ny) % self.ny].x
+                vorticity = ((right-left)-(up-down))
+                h = vorticity*50 + 0.5
+                level = ti.max(ti.min(ti.floor(h*(self.colormap_field.shape[0]-1)),self.colormap_field.shape[0]-2), 0)
+                colorphase = ti.cast(ti.min(ti.max(h*(self.colormap_field.shape[0]-1) - level, 0),1), ti.f32)
+                level_idx = ti.cast(level, dtype=int)
+
+                self.image[x,y+self.ny].r = ti.cast((self.colormap_field[level_idx].x * (1-colorphase) + colorphase*self.colormap_field[level_idx+1].x)/255, ti.float32)
+                self.image[x,y+self.ny].g = ti.cast((self.colormap_field[level_idx].y * (1-colorphase) + colorphase*self.colormap_field[level_idx+1].y)/255, ti.float32)
+                self.image[x,y+self.ny].b = ti.cast((self.colormap_field[level_idx].z * (1-colorphase) + colorphase*self.colormap_field[level_idx+1].z)/255, ti.float32)
             else:
                 self.image[x,y] = ti.Vector([ 0.0, 0.0, 0.0])
+                self.image[x,y+self.ny] = ti.Vector([ 0.0, 0.0, 0.0])
     
     def render(self):
         self.canvas.set_image(self.image)
