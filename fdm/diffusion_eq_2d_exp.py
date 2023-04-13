@@ -79,9 +79,10 @@ class Solver:
     @ti.kernel
     def populate_D(self, D: float):
         for k in ti.grouped(self.u):
-            self.u[k] = self.u_min + self.u_range - self.u_range * k.x / self.n
+            # self.u[k] = self.u_min + self.u_range - self.u_range * k.y / self.n
             # self.u[k] = self.u_min + ti.random()*self.u_range
             # self.u[k] = self.u_min + self.u_range/2 + ti.abs(0.5 - k.x/self.n)*self.u_range - ti.abs(0.5 - k.y/self.n)*self.u_range
+            self.u[k] = self.u_min
         self.D.fill(D)
         # # Crucifix thing
         # for col, row in self.D:
@@ -190,7 +191,7 @@ class Solver:
             self.u[node] = self.u_next[node]
         ti.sync()
 
-        """Compute U"""
+        """Compute q"""
         self.q.fill(0.0)
         for col, row in self.u:
             hor = 0.0
@@ -375,7 +376,7 @@ if __name__ == '__main__':
     ti.init(arch=ti.cuda, default_fp=ti.f32)
     D = 0.000002 # [m2/s]
     dx = 0.01 # [m]
-    dt = dx**2 / (4*D*2*8) # [s]
+    dt = dx**2 / (4*D*12) # [s]
     print(dt)
     p = 8
     n = 2**p
@@ -383,7 +384,7 @@ if __name__ == '__main__':
     boundary_values = [
         [-1, -1],
         # [1, 1],
-        [0, 1]
+        [1,0]
     ]
 
     colormap = [
