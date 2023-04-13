@@ -20,10 +20,10 @@ mat_names = [
     "xps"
 ]
 mat_defs = np.array([
-    [3.0, 1450, 35], 
-    [6.0, 1450, 35],
+    [3.0, 3000, 1000], 
+    [6.0, 3000, 1000],
     [2.3, 1000, 2300], 
-    [0.039, 100, 35],
+    [0.039, 1450, 35],
 ])
 mat_diffs = mat_defs[:,0]/(mat_defs[:,1]*mat_defs[:,2])
 mat_ids = {
@@ -79,9 +79,9 @@ class Solver:
     @ti.kernel
     def populate_D(self, D: float):
         for k in ti.grouped(self.u):
-            self.u[k] = self.u_min + self.u_range * k.x / self.n
-            self.u[k] = self.u_min + ti.random()*self.u_range
-            self.u[k] = self.u_min + self.u_range/2 + ti.abs(0.5 - k.x/self.n)*self.u_range - ti.abs(0.5 - k.y/self.n)*self.u_range
+            self.u[k] = self.u_min + self.u_range - self.u_range * k.x / self.n
+            # self.u[k] = self.u_min + ti.random()*self.u_range
+            # self.u[k] = self.u_min + self.u_range/2 + ti.abs(0.5 - k.x/self.n)*self.u_range - ti.abs(0.5 - k.y/self.n)*self.u_range
         self.D.fill(D)
         # # Crucifix thing
         # for col, row in self.D:
@@ -215,23 +215,31 @@ class Solver:
                 self.u_next[col, row] = boundary
             else:
                 """Adiabatic"""
-                mult = 1.0
-                alpha = self.D[col, row]*self.c
-                right = 0.0
+                k = self.k[col, row]
                 left = 0.0
-                up = 0.0
+                right = 0.0
                 down = 0.0
+                up = 0.0
+                alpha_l = 0.0
+                alpha_r = 0.0
+                alpha_d = 0.0
+                alpha_u = 0.0
+                rho_cp = self.rho[col, row] * self.cp[col, row]
+                factor = self.c / rho_cp
                 if col > 0:
                     left  = self.u[col - 1, row]
+                    alpha_l = (self.k[col - 1, row] + k)/2
                 else:
                     right = self.u[col + 1, row]
+                    alpha_r = (self.k[col + 1, row] + k)/2
                 if row > 0:
                     down = self.u[col, row - 1]
-                    mult = mult + 1
+                    alpha_d = (self.k[col , row - 1] + k)/2
                 if row < self.n-1:
                     up = self.u[col, row + 1]
-                    mult = mult = mult + 1
-                self.u_next[col, row] = (1 - mult*alpha) * self.u[col, row] + alpha * (left + right + up + down)
+                    alpha_u = (self.k[col , row + 1] + k)/2
+                alpha = alpha_l + alpha_r + alpha_d + alpha_u
+                self.u_next[col, row] = (1 - alpha*factor) * self.u[col, row] + (alpha_l * left + alpha_r * right + alpha_d * down + alpha_u * up)*factor
         else:
             boundary = self.boundaries[1, int(row / (self.n-1))]
             if boundary >= 0: # TODO: create a separate flag
@@ -239,23 +247,30 @@ class Solver:
                 self.u_next[col, row] = boundary
             else:
                 """Adiabatic"""
-                mult = 1.0
-                alpha = self.D[col, row]*self.c
-                right = 0.0
+                k = self.k[col, row]
                 left = 0.0
-                up = 0.0
+                right = 0.0
                 down = 0.0
+                up = 0.0
+                alpha_l = 0.0
+                alpha_r = 0.0
+                alpha_d = 0.0
+                alpha_u = 0.0
+                rho_cp = self.rho[col, row] * self.cp[col, row]
                 if row > 0:
                     down = self.u[col, row - 1]
+                    alpha_d = (self.k[col, row - 1] + k)/2
                 else:
                     up = self.u[col, row + 1]
+                    alpha_u = (self.k[col, row + 1] + k)/2
                 if col > 0:
                     left = self.u[col - 1, row]
-                    mult = mult + 1
+                    alpha_l = (self.k[col - 1, row] + k)/2
                 if col < self.n-1:
                     right = self.u[col + 1, row]
-                    mult = mult = mult + 1
-                self.u_next[col, row] = (1 - mult*alpha) * self.u[col, row] + alpha * (left + right + up + down)
+                    alpha_l = (self.k[col + 1, row] + k)/2
+                alpha = alpha_l + alpha_r + alpha_d + alpha_u
+                self.u_next[col, row] = (1 - alpha/rho_cp) * self.u[col, row] + (alpha_l * left + alpha_r * right + alpha_d * down + alpha_u * up)/rho_cp
     @ti.func 
     def handle_internal_explicit(self, col, row):
         k = self.k[col, row]
@@ -359,16 +374,16 @@ class Solver:
 if __name__ == '__main__':
     ti.init(arch=ti.cuda, default_fp=ti.f32)
     D = 0.000002 # [m2/s]
-    dx = 0.005 # [m]
-    dt = dx**2 / (4*D*2*64) # [s]
+    dx = 0.01 # [m]
+    dt = dx**2 / (4*D*2*8) # [s]
     print(dt)
-    p = 9
+    p = 8
     n = 2**p
 
     boundary_values = [
-        # [-1, -1],
-        [1, 1],
-        [0, 0]
+        [-1, -1],
+        # [1, 1],
+        [0, 1]
     ]
 
     colormap = [
