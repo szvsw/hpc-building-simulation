@@ -20,10 +20,10 @@ mat_names = [
     "xps"
 ]
 mat_defs = np.array([
-    [3.0, 1450, 35], 
-    [6.0, 1450, 35],
+    [0.01, 3000, 1000], 
+    [0.0039, 3000, 1000],
     [2.3, 1000, 2300], 
-    [0.039, 100, 35],
+    [0.0001, 1350, 35],
 ])
 mat_diffs = mat_defs[:,0]/(mat_defs[:,1]*mat_defs[:,2])
 mat_ids = {
@@ -55,6 +55,9 @@ class Solver:
         self.cp  = ti.field(dtype=float, shape=(n,n))
         self.D  = ti.field(dtype=float, shape=(n,n))
         self.u = ti.field(dtype=float, shape=(n,n))
+        self.u_next = ti.field(dtype=float, shape=(n,n))
+        self.u_temp = ti.field(dtype=float, shape=(n,n))
+        self.err = ti.field(dtype=float, shape=(n,n))
         self.colors   = ti.Vector.field(3, dtype=ti.f32, shape=(2*n, 2*n))
         self.populate_D(D)
         self.boundaries = ti.field(dtype=float, shape=(2,2))
@@ -68,7 +71,7 @@ class Solver:
                     bound = -1
                 self.boundaries[col, row] = bound
         self.q = ti.field(dtype=float, shape=(n,n))
-        self.u_next = ti.field(dtype=float, shape=(n,n))
+        self.tol = 2
 
         # rendering
         self.colormap_field = ti.Vector.field(3, dtype=ti.f32, shape=len(colormap))
@@ -82,6 +85,8 @@ class Solver:
             self.u[k] = self.u_min + self.u_range * k.x / self.n
             self.u[k] = self.u_min + ti.random()*self.u_range
             self.u[k] = self.u_min + self.u_range/2 + ti.abs(0.5 - k.x/self.n)*self.u_range - ti.abs(0.5 - k.y/self.n)*self.u_range
+
+            self.u_next[k] = self.u[k]
         self.D.fill(D)
         # # Crucifix thing
         # for col, row in self.D:
@@ -127,12 +132,12 @@ class Solver:
                 self.D[col, row] = 0.01*D
                 self.D[col, row] = 0.1*D
 
-                self.mat[col, row] = ti.cast(mat_ids['xps'], ti.i8)
+                self.mat[col, row] = ti.cast(mat_ids['outer'], ti.i8)
 
-                self.k[col, row] = mat_defs[mat_ids['xps'], 0]
-                self.cp[col, row] = mat_defs[mat_ids['xps'], 1]
-                self.rho[col, row] = mat_defs[mat_ids['xps'], 2]
-                self.D[col, row] = mat_diffs[mat_ids['xps']]
+                self.k[col, row] = mat_defs[mat_ids['outer'], 0]
+                self.cp[col, row] = mat_defs[mat_ids['outer'], 1]
+                self.rho[col, row] = mat_defs[mat_ids['outer'], 2]
+                self.D[col, row] = mat_diffs[mat_ids['outer']]
             else:
                 self.D[col, row] = 0.5*D
 
@@ -259,10 +264,10 @@ class Solver:
     @ti.func 
     def handle_internal_explicit(self, col, row):
         k = self.k[col, row]
-        left  = self.u[col - 1, row]
-        right = self.u[col + 1, row]
-        down  = self.u[col, row - 1]
-        up    = self.u[col, row + 1]
+        # left  = self.u[col - 1, row]
+        # right = self.u[col + 1, row]
+        # down  = self.u[col, row - 1]
+        # up    = self.u[col, row + 1]
         # alpha = self.D[col, row]*self.c
         # TODO: is the /2 necessary?
         # alpha_l = self.c*(self.k[col - 1, row] + k)/2
@@ -279,9 +284,11 @@ class Solver:
         # self.u_next[col, row] = (1 - 4*alpha) * self.u[col, row] + alpha * (left + right + up + down)
         # self.u_next[col, row] = (1 - alpha) * self.u[col, row] + alpha_l*left + alpha_r*right + alpha_d*down + alpha_u*up
         # self.u_next[col, row] = (1 - alpha/c_v) * self.u[col, row] + (alpha_l*left + alpha_r*right + alpha_d*down + alpha_u*up)/c_v
-        c_v = self.rho[col, row]*self.cp[col, row]
-        q = -alpha * self.u[col, row] + alpha_l*left + alpha_r*right + alpha_d*down + alpha_u*up
-        self.u_next[col, row] = self.u[col, row] + self.c * q / c_v
+        
+
+        # c_v = self.rho[col, row]*self.cp[col, row]
+        # q = -alpha * self.u[col, row] + alpha_l*left + alpha_r*right + alpha_d*down + alpha_u*up
+        # self.u_next[col, row] = self.u[col, row] + self.c * q / c_v
 
         # d_left  = self.D[col - 1, row]
         # d_right = self.D[col + 1, row]
@@ -298,6 +305,28 @@ class Solver:
         #     (four_d + ver_outer) * self.u[col, row + 1] + \
         #     (four_d - ver_outer) * self.u[col, row - 1]
         # )
+
+        err = 9999.0
+        jac_it = 0
+        denom = 1 + alpha*self.c
+        weight_l = alpha_l * self.c / denom
+        weight_r = alpha_r * self.c / denom
+        weight_u = alpha_u * self.c / denom
+        weight_d = alpha_d * self.c / denom
+        weight = alpha*self.c / denom
+        while err > self.tol:
+            self.u_next[col, row] = self.u[col,row] / denom\
+                + weight_l * self.u_next[col-1, row]\
+                + weight_r * self.u_next[col+1, row]\
+                + weight_d * self.u_next[col, row-1]\
+                + weight_u * self.u_next[col, row+1]
+            err = ti.abs(self.u_next[col, row] - self.u[col, row])
+
+            jac_it = jac_it+1
+            if row==self.n-2 or col == self.n-2 or row == 1 or col == 1:
+                break
+            if jac_it > 1000:
+                print(f"Taking a long time to converge {col},{row}:{jac_it}!")
         
     def benchmark_explicit(self, n_tests):
         print("Starting benchmark...")
@@ -359,10 +388,10 @@ class Solver:
 if __name__ == '__main__':
     ti.init(arch=ti.cuda, default_fp=ti.f32)
     D = 0.000002 # [m2/s]
-    dx = 0.005 # [m]
-    dt = dx**2 / (4*D*2*64) # [s]
+    dx = 0.01 # [m]
+    dt = dx**2 / (4*D) # [s]
     print(dt)
-    p = 9
+    p = 8
     n = 2**p
 
     boundary_values = [
@@ -400,7 +429,7 @@ if __name__ == '__main__':
     canvas = window.get_canvas()
 
     it = 0
-    hr = 1
+    t_marker = 1
     
     fig = plt.figure()
     X, Y = np.meshgrid(np.arange(solver.n), np.arange(solver.n), indexing="xy")
@@ -422,9 +451,9 @@ if __name__ == '__main__':
             plt.axis("off")
             plt.draw()
             plt.pause(0.01)
-        if it*solver.updates_per_batch*solver.dt/3600 > hr:
-            print(f"Completed hr {hr}")
-            hr +=1
+        if it*solver.updates_per_batch*solver.dt/(3600*24) > t_marker:
+            print(f"Completed day {t_marker}")
+            t_marker +=1
 
         it += 1
         window.show()
