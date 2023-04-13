@@ -20,10 +20,10 @@ mat_names = [
     "xps"
 ]
 mat_defs = np.array([
-    [3.0, 3000, 1000], 
-    [6.0, 3000, 1000],
+    [3.0, 1450, 35], 
+    [6.0, 1450, 35],
     [2.3, 1000, 2300], 
-    [0.039, 1450, 35],
+    [0.039, 100, 35],
 ])
 mat_diffs = mat_defs[:,0]/(mat_defs[:,1]*mat_defs[:,2])
 mat_ids = {
@@ -78,7 +78,10 @@ class Solver:
 
     @ti.kernel
     def populate_D(self, D: float):
-        self.u.fill(self.u_min)
+        for k in ti.grouped(self.u):
+            self.u[k] = self.u_min + self.u_range * k.x / self.n
+            self.u[k] = self.u_min + ti.random()*self.u_range
+            self.u[k] = self.u_min + self.u_range/2 + ti.abs(0.5 - k.x/self.n)*self.u_range - ti.abs(0.5 - k.y/self.n)*self.u_range
         self.D.fill(D)
         # # Crucifix thing
         # for col, row in self.D:
@@ -105,21 +108,21 @@ class Solver:
             if row < 3/8 * self.n:
                 self.D[col, row] = 0.5*D
 
-                self.mat[col, row] = ti.cast(mat_ids['outer'], ti.i8)
+                self.mat[col, row] = ti.cast(mat_ids['channel'], ti.i8)
 
-                self.k[col, row] = mat_defs[mat_ids['outer'], 0]
-                self.cp[col, row] = mat_defs[mat_ids['outer'], 1]
-                self.rho[col, row] = mat_defs[mat_ids['outer'], 2]
-                # self.D[col, row] = mat_diffs[mat_ids['outer']]
+                self.k[col, row] = mat_defs[mat_ids['channel'], 0]
+                self.cp[col, row] = mat_defs[mat_ids['channel'], 1]
+                self.rho[col, row] = mat_defs[mat_ids['channel'], 2]
+                self.D[col, row] = mat_diffs[mat_ids['channel']]
             elif row < 4/8 * self.n:
                 self.D[col, row] = 0.1*D
 
-                self.mat[col, row] = ti.cast(mat_ids['concrete'], ti.i8)
+                self.mat[col, row] = ti.cast(mat_ids['xps'], ti.i8)
 
-                self.k[col, row] = mat_defs[mat_ids['concrete'], 0]
-                self.cp[col, row] = mat_defs[mat_ids['concrete'], 1]
-                self.rho[col, row] = mat_defs[mat_ids['concrete'], 2]
-                # self.D[col, row] = mat_diffs[mat_ids['concrete']]
+                self.k[col, row] = mat_defs[mat_ids['xps'], 0]
+                self.cp[col, row] = mat_defs[mat_ids['xps'], 1]
+                self.rho[col, row] = mat_defs[mat_ids['xps'], 2]
+                self.D[col, row] = mat_diffs[mat_ids['xps']]
             elif row < 5/8 * self.n:
                 self.D[col, row] = 0.01*D
                 self.D[col, row] = 0.1*D
@@ -129,16 +132,16 @@ class Solver:
                 self.k[col, row] = mat_defs[mat_ids['xps'], 0]
                 self.cp[col, row] = mat_defs[mat_ids['xps'], 1]
                 self.rho[col, row] = mat_defs[mat_ids['xps'], 2]
-                # self.D[col, row] = mat_diffs[mat_ids['xps']]
+                self.D[col, row] = mat_diffs[mat_ids['xps']]
             else:
                 self.D[col, row] = 0.5*D
 
-                self.mat[col, row] = ti.cast(mat_ids['outer'], ti.i8)
+                self.mat[col, row] = ti.cast(mat_ids['channel'], ti.i8)
 
-                self.k[col, row] = mat_defs[mat_ids['outer'], 0]
-                self.cp[col, row] = mat_defs[mat_ids['outer'], 1]
-                self.rho[col, row] = mat_defs[mat_ids['outer'], 2]
-                # self.D[col, row] = mat_diffs[mat_ids['outer']]
+                self.k[col, row] = mat_defs[mat_ids['channel'], 0]
+                self.cp[col, row] = mat_defs[mat_ids['channel'], 1]
+                self.rho[col, row] = mat_defs[mat_ids['channel'], 2]
+                self.D[col, row] = mat_diffs[mat_ids['channel']]
             if (row >= 3/8*self.n and row <= 5/8*self.n) and ((col > 6/21*self.n and col < 7/21*self.n) or (col > 10/21*self.n and col < 11/21*self.n) or (col > 14/21*self.n and col < 15/21*self.n)):
                 self.D[col, row] = D
 
@@ -147,7 +150,7 @@ class Solver:
                 self.k[col, row] = mat_defs[mat_ids['channel'], 0]
                 self.cp[col, row] = mat_defs[mat_ids['channel'], 1]
                 self.rho[col, row] = mat_defs[mat_ids['channel'], 2]
-                # self.D[col, row] = mat_diffs[mat_ids['channel']]
+                self.D[col, row] = mat_diffs[mat_ids['channel']]
             gray_scale = (self.D[col, row] - 0.01*D) / (0.99*D)
             self.colors[col+self.n, row] = ti.Vector([mat_colors[self.mat[col, row], 0], mat_colors[self.mat[col, row], 1], mat_colors[self.mat[col, row], 2]])
             self.colors[col+self.n,row+self.n] = ti.Vector([gray_scale, gray_scale, gray_scale])
@@ -194,14 +197,14 @@ class Solver:
             ver = 0.0
             # TODO: handle min/max
             if col > 0:
-                hor += (self.u[col, row] - self.u[col - 1, row])/self.dx * (self.D[col, row] + self.D[col - 1, row])/2
+                hor += (self.u[col, row] - self.u[col - 1, row])/self.dx * (self.k[col, row] + self.k[col - 1, row])/2
             if col < self.n - 1:
-                hor += (self.u[col + 1, row] - self.u[col, row])/self.dx * (self.D[col, row] + self.D[col + 1, row])/2
+                hor += (self.u[col + 1, row] - self.u[col, row])/self.dx * (self.k[col, row] + self.k[col + 1, row])/2
             if row > 0:
-                ver += (self.u[col, row] - self.u[col, row - 1])/self.dx * (self.D[col, row] + self.D[col, row - 1])/2
+                ver += (self.u[col, row] - self.u[col, row - 1])/self.dx * (self.k[col, row] + self.k[col, row - 1])/2
             if row < self.n - 1:
-                ver += (self.u[col, row + 1] - self.u[col, row])/self.dx * (self.D[col, row] + self.D[col, row + 1])/2
-            self.q[col, row] = ti.sqrt(0.25*(hor**2 + ver**2))*20000#/50.0
+                ver += (self.u[col, row + 1] - self.u[col, row])/self.dx * (self.k[col, row] + self.k[col, row + 1])/2
+            self.q[col, row] = ti.log(ti.sqrt(0.25*(hor**2 + ver**2)))/ti.log(175)
 
     @ti.func
     def handle_boundary_explicit(self, col, row):
@@ -255,27 +258,46 @@ class Solver:
                 self.u_next[col, row] = (1 - mult*alpha) * self.u[col, row] + alpha * (left + right + up + down)
     @ti.func 
     def handle_internal_explicit(self, col, row):
-        D = self.D[col, row]
+        k = self.k[col, row]
         left  = self.u[col - 1, row]
         right = self.u[col + 1, row]
         down  = self.u[col, row - 1]
         up    = self.u[col, row + 1]
         # alpha = self.D[col, row]*self.c
         # TODO: is the /2 necessary?
-        alpha_l = self.c*(self.D[col - 1, row] + D)/2
-        alpha_r = self.c*(self.D[col + 1, row] + D)/2
-        alpha_d = self.c*(self.D[col, row - 1] + D)/2
-        alpha_u = self.c*(self.D[col, row + 1] + D)/2
-        alpha_l = self.c*(self.D[col - 1, row] + D)
-        alpha_r = self.c*(self.D[col + 1, row] + D)
-        alpha_d = self.c*(self.D[col, row - 1] + D)
-        alpha_u = self.c*(self.D[col, row + 1] + D)
+        # alpha_l = self.c*(self.k[col - 1, row] + k)/2
+        # alpha_r = self.c*(self.k[col + 1, row] + k)/2
+        # alpha_d = self.c*(self.k[col, row - 1] + k)/2
+        # alpha_u = self.c*(self.k[col, row + 1] + k)/2
+        alpha_l = (self.k[col - 1, row] + k)/2
+        alpha_r = (self.k[col + 1, row] + k)/2
+        alpha_d = (self.k[col, row - 1] + k)/2
+        alpha_u = (self.k[col, row + 1] + k)/2
         alpha = alpha_l + alpha_r + alpha_d + alpha_u
 
 
         # self.u_next[col, row] = (1 - 4*alpha) * self.u[col, row] + alpha * (left + right + up + down)
-        self.u_next[col, row] = (1 - alpha) * self.u[col, row] + alpha_l*left + alpha_r*right + alpha_d*down + alpha_u*up
-        self.u_next[col, row] = (1 - alpha) * self.u[col, row] + alpha_l*left + alpha_r*right + alpha_d*down + alpha_u*up
+        # self.u_next[col, row] = (1 - alpha) * self.u[col, row] + alpha_l*left + alpha_r*right + alpha_d*down + alpha_u*up
+        # self.u_next[col, row] = (1 - alpha/c_v) * self.u[col, row] + (alpha_l*left + alpha_r*right + alpha_d*down + alpha_u*up)/c_v
+        c_v = self.rho[col, row]*self.cp[col, row]
+        q = -alpha * self.u[col, row] + alpha_l*left + alpha_r*right + alpha_d*down + alpha_u*up
+        self.u_next[col, row] = self.u[col, row] + self.c * q / c_v
+
+        # d_left  = self.D[col - 1, row]
+        # d_right = self.D[col + 1, row]
+        # d_down  = self.D[col, row - 1]
+        # d_up    = self.D[col, row + 1]
+        # hor_outer = d_right-d_left
+        # ver_outer = d_up-d_down
+        # four_d = 4*self.D[col,row]
+
+        # self.u_next[col, row] = self.u[col, row] + self.dt/(4*self.dx**2) * ( 
+        #     -4*four_d*             self.u[col ,    row] + \
+        #     (four_d + hor_outer) * self.u[col + 1, row] + \
+        #     (four_d - hor_outer) * self.u[col - 1, row] + \
+        #     (four_d + ver_outer) * self.u[col, row + 1] + \
+        #     (four_d - ver_outer) * self.u[col, row - 1]
+        # )
         
     def benchmark_explicit(self, n_tests):
         print("Starting benchmark...")
@@ -337,15 +359,16 @@ class Solver:
 if __name__ == '__main__':
     ti.init(arch=ti.cuda, default_fp=ti.f32)
     D = 0.000002 # [m2/s]
-    dx = 0.01 # [m]
-    dt = dx**2 / (4*D*2) # [s]
+    dx = 0.005 # [m]
+    dt = dx**2 / (4*D*2*64) # [s]
     print(dt)
-    p = 8
+    p = 9
     n = 2**p
 
     boundary_values = [
-        [-1, -1],
-        [1, 0]
+        # [-1, -1],
+        [1, 1],
+        [0, 0]
     ]
 
     colormap = [
@@ -377,6 +400,7 @@ if __name__ == '__main__':
     canvas = window.get_canvas()
 
     it = 0
+    hr = 1
     
     fig = plt.figure()
     X, Y = np.meshgrid(np.arange(solver.n), np.arange(solver.n), indexing="xy")
@@ -398,6 +422,9 @@ if __name__ == '__main__':
             plt.axis("off")
             plt.draw()
             plt.pause(0.01)
+        if it*solver.updates_per_batch*solver.dt/3600 > hr:
+            print(f"Completed hr {hr}")
+            hr +=1
 
         it += 1
         window.show()
