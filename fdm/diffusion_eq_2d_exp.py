@@ -20,10 +20,10 @@ mat_names = [
     "xps"
 ]
 mat_defs = np.array([
-    [0.01, 3000, 1000], 
-    [0.0039, 3000, 1000],
+    [3, 3000, 1000], 
+    [6, 3000, 1000],
     [2.3, 1000, 2300], 
-    [0.0001, 1350, 35],
+    [0.039, 1450, 35],
 ])
 mat_diffs = mat_defs[:,0]/(mat_defs[:,1]*mat_defs[:,2])
 mat_ids = {
@@ -40,7 +40,8 @@ for name,mat_id in mat_ids.items():
 @ti.data_oriented
 class Solver:
     def __init__(self, dt, dx, n, D, boundary_values, colormap, u_min, u_range, updates_per_batch) -> None:
-        self.mesh_render_size = 5
+
+        """Consts"""
         self.u_min = u_min
         self.u_range = u_range
         self.n  = n
@@ -48,20 +49,44 @@ class Solver:
         self.L  = dx * (n - 1)
         self.dt = dt
         self.c  = self.dt / self.dx**2
+        self.updates_per_batch = updates_per_batch
+        self.tol = 0.001
 
+        "Time Field"
+        self.t = ti.field(dtype=float, shape=())
+
+        """Material Data Fields"""
         self.mat = ti.field(dtype=ti.i8, shape=(n,n))
         self.k  = ti.field(dtype=float, shape=(n,n))
         self.rho  = ti.field(dtype=float, shape=(n,n))
         self.cp  = ti.field(dtype=float, shape=(n,n))
         self.D  = ti.field(dtype=float, shape=(n,n))
+
+        """BC Fields"""
+        self.boundaries = ti.field(dtype=float, shape=(2,2))
+
+        """Solution Fields"""
         self.u = ti.field(dtype=float, shape=(n,n))
         self.u_next = ti.field(dtype=float, shape=(n,n))
         self.u_temp = ti.field(dtype=float, shape=(n,n))
-        self.err = ti.field(dtype=float, shape=(n,n))
+        self.q = ti.field(dtype=float, shape=(n,n))
+
+        """Rendering Fields"""
         self.colors   = ti.Vector.field(3, dtype=ti.f32, shape=(2*n, 2*n))
+        self.colormap_field = ti.Vector.field(3, dtype=ti.f32, shape=len(colormap))
+
+
+        """Inits"""
+        self.t[None] = 0
         self.populate_D(D)
-        self.boundaries = ti.field(dtype=float, shape=(2,2))
-        self.updates_per_batch = updates_per_batch
+        self.init_boundary_values(boundary_values)
+        self.init_colormap(colormap)
+
+
+
+
+    def init_boundary_values(self, boundary_values):
+        # NB: this does not init the cells, just the reference values!
         for col in range(2):
             for row in range(2):
                 bound = np.array(boundary_values)[col, row]
@@ -70,36 +95,20 @@ class Solver:
                 else:
                     bound = -1
                 self.boundaries[col, row] = bound
-        self.q = ti.field(dtype=float, shape=(n,n))
-        self.tol = 2
 
-        # rendering
-        self.colormap_field = ti.Vector.field(3, dtype=ti.f32, shape=len(colormap))
+    def init_colormap(self, colormap):
         for i, color in enumerate(colormap):
             self.colormap_field[i] = ti.Vector(color)
-
-
     @ti.kernel
     def populate_D(self, D: float):
         for k in ti.grouped(self.u):
             self.u[k] = self.u_min + self.u_range * k.x / self.n
             self.u[k] = self.u_min + ti.random()*self.u_range
-            self.u[k] = self.u_min + self.u_range/2 + ti.abs(0.5 - k.x/self.n)*self.u_range - ti.abs(0.5 - k.y/self.n)*self.u_range
+            # self.u[k] = self.u_min + self.u_range/2 + ti.abs(0.5 - k.x/self.n)*self.u_range - ti.abs(0.5 - k.y/self.n)*self.u_range
 
             self.u_next[k] = self.u[k]
         self.D.fill(D)
-        # # Crucifix thing
-        # for col, row in self.D:
-        #     if col > 5/7 * self.n and col < 6/7*self.n and row > 1/8*self.n and row < 7/8*self.n:
-        #         self.D[col, row] = D / 500.0
-        #     if col > 3/7 * self.n and col < 4/7*self.n and row > 1/8*self.n and row < 7/8*self.n:
-        #         self.D[col, row] = D / 5000.0
-        #     if col > 1/7 * self.n and col < 2/7*self.n and row > 1/8*self.n and row < 7/8*self.n:
-        #         self.D[col, row] = D / 500.0
-        #     if col > 2/7 * self.n and col < 3/7*self.n and row > 3/7*self.n and row < 4/7*self.n:
-        #         self.D[col, row] = D / 5000.0
-        #     if col > 4/7 * self.n and col < 5/7*self.n and row > 3/7*self.n and row < 4/7*self.n:
-        #         self.D[col, row] = D / 5000.0
+
         mat_colors = ti.Matrix(
             [
                 [ti.random(), ti.random(), ti.random()],
@@ -109,16 +118,17 @@ class Solver:
                 [ti.random(), ti.random(), ti.random()]
             ]
         )
+
         for col, row in self.D:
             if row < 3/8 * self.n:
                 self.D[col, row] = 0.5*D
 
-                self.mat[col, row] = ti.cast(mat_ids['channel'], ti.i8)
+                self.mat[col, row] = ti.cast(mat_ids['outer'], ti.i8)
 
-                self.k[col, row] = mat_defs[mat_ids['channel'], 0]
-                self.cp[col, row] = mat_defs[mat_ids['channel'], 1]
-                self.rho[col, row] = mat_defs[mat_ids['channel'], 2]
-                self.D[col, row] = mat_diffs[mat_ids['channel']]
+                self.k[col, row] = mat_defs[mat_ids['outer'], 0]
+                self.cp[col, row] = mat_defs[mat_ids['outer'], 1]
+                self.rho[col, row] = mat_defs[mat_ids['outer'], 2]
+                self.D[col, row] = mat_diffs[mat_ids['outer']]
             elif row < 4/8 * self.n:
                 self.D[col, row] = 0.1*D
 
@@ -132,21 +142,21 @@ class Solver:
                 self.D[col, row] = 0.01*D
                 self.D[col, row] = 0.1*D
 
+                self.mat[col, row] = ti.cast(mat_ids['concrete'], ti.i8)
+
+                self.k[col, row] = mat_defs[mat_ids['concrete'], 0]
+                self.cp[col, row] = mat_defs[mat_ids['concrete'], 1]
+                self.rho[col, row] = mat_defs[mat_ids['concrete'], 2]
+                self.D[col, row] = mat_diffs[mat_ids['concrete']]
+            else:
+                self.D[col, row] = 0.5*D
+
                 self.mat[col, row] = ti.cast(mat_ids['outer'], ti.i8)
 
                 self.k[col, row] = mat_defs[mat_ids['outer'], 0]
                 self.cp[col, row] = mat_defs[mat_ids['outer'], 1]
                 self.rho[col, row] = mat_defs[mat_ids['outer'], 2]
                 self.D[col, row] = mat_diffs[mat_ids['outer']]
-            else:
-                self.D[col, row] = 0.5*D
-
-                self.mat[col, row] = ti.cast(mat_ids['channel'], ti.i8)
-
-                self.k[col, row] = mat_defs[mat_ids['channel'], 0]
-                self.cp[col, row] = mat_defs[mat_ids['channel'], 1]
-                self.rho[col, row] = mat_defs[mat_ids['channel'], 2]
-                self.D[col, row] = mat_diffs[mat_ids['channel']]
             if (row >= 3/8*self.n and row <= 5/8*self.n) and ((col > 6/21*self.n and col < 7/21*self.n) or (col > 10/21*self.n and col < 11/21*self.n) or (col > 14/21*self.n and col < 15/21*self.n)):
                 self.D[col, row] = D
 
@@ -159,14 +169,6 @@ class Solver:
             gray_scale = (self.D[col, row] - 0.01*D) / (0.99*D)
             self.colors[col+self.n, row] = ti.Vector([mat_colors[self.mat[col, row], 0], mat_colors[self.mat[col, row], 1], mat_colors[self.mat[col, row], 2]])
             self.colors[col+self.n,row+self.n] = ti.Vector([gray_scale, gray_scale, gray_scale])
-
-
-        
-        # for col, row in self.mat:
-        #     self.k[col, row] = mat_defs[int(self.mat[col, row]), 0]
-        #     self.cp[col, row] = mat_defs[self.mat[col, row], 1]
-        #     self.rho[col, row] = mat_defs[self.mat[col, row], 2]
-        #     self.D[col, row] = mat_diffs[self.mat[col, row]]
 
     @ti.kernel
     def check_explicit_cfl(self):
@@ -187,7 +189,7 @@ class Solver:
             if col == 0 or row == 0 or col == self.n-1 or row == self.n-1:
                 self.handle_boundary_explicit(col, row)
             else:
-                self.handle_internal_explicit(col, row)
+                self.handle_internal_jacobi(col, row)
         ti.sync()
 
         """Shift"""
@@ -195,21 +197,22 @@ class Solver:
             self.u[node] = self.u_next[node]
         ti.sync()
 
-        """Compute U"""
+        """Compute Q"""
         self.q.fill(0.0)
         for col, row in self.u:
             hor = 0.0
             ver = 0.0
             # TODO: handle min/max
             if col > 0:
-                hor += (self.u[col, row] - self.u[col - 1, row])/self.dx * (self.k[col, row] + self.k[col - 1, row])/2
+                hor += (self.u[col, row] - self.u[col - 1, row]) * (self.k[col, row] + self.k[col - 1, row])/2
             if col < self.n - 1:
-                hor += (self.u[col + 1, row] - self.u[col, row])/self.dx * (self.k[col, row] + self.k[col + 1, row])/2
+                hor += (self.u[col + 1, row] - self.u[col, row]) * (self.k[col, row] + self.k[col + 1, row])/2
             if row > 0:
-                ver += (self.u[col, row] - self.u[col, row - 1])/self.dx * (self.k[col, row] + self.k[col, row - 1])/2
+                ver += (self.u[col, row] - self.u[col, row - 1]) * (self.k[col, row] + self.k[col, row - 1])/2
             if row < self.n - 1:
-                ver += (self.u[col, row + 1] - self.u[col, row])/self.dx * (self.k[col, row] + self.k[col, row + 1])/2
-            self.q[col, row] = ti.log(ti.sqrt(0.25*(hor**2 + ver**2)))/ti.log(175)
+                ver += (self.u[col, row + 1] - self.u[col, row]) * (self.k[col, row] + self.k[col, row + 1])/2
+            # TODO: precompute some of these consts.
+            self.q[col, row] = ti.log(ti.sqrt(ti.static(0.25/self.dx**2)*((hor**2 + ver**2))))/ti.static(ti.log(175))
 
     @ti.func
     def handle_boundary_explicit(self, col, row):
@@ -262,71 +265,32 @@ class Solver:
                     mult = mult = mult + 1
                 self.u_next[col, row] = (1 - mult*alpha) * self.u[col, row] + alpha * (left + right + up + down)
     @ti.func 
-    def handle_internal_explicit(self, col, row):
+    def handle_internal_jacobi(self, col, row):
         k = self.k[col, row]
-        # left  = self.u[col - 1, row]
-        # right = self.u[col + 1, row]
-        # down  = self.u[col, row - 1]
-        # up    = self.u[col, row + 1]
-        # alpha = self.D[col, row]*self.c
-        # TODO: is the /2 necessary?
-        # alpha_l = self.c*(self.k[col - 1, row] + k)/2
-        # alpha_r = self.c*(self.k[col + 1, row] + k)/2
-        # alpha_d = self.c*(self.k[col, row - 1] + k)/2
-        # alpha_u = self.c*(self.k[col, row + 1] + k)/2
+        # TODO: Move these static computations into a precomputed field
         alpha_l = (self.k[col - 1, row] + k)/2
         alpha_r = (self.k[col + 1, row] + k)/2
         alpha_d = (self.k[col, row - 1] + k)/2
         alpha_u = (self.k[col, row + 1] + k)/2
         alpha = alpha_l + alpha_r + alpha_d + alpha_u
-
-
-        # self.u_next[col, row] = (1 - 4*alpha) * self.u[col, row] + alpha * (left + right + up + down)
-        # self.u_next[col, row] = (1 - alpha) * self.u[col, row] + alpha_l*left + alpha_r*right + alpha_d*down + alpha_u*up
-        # self.u_next[col, row] = (1 - alpha/c_v) * self.u[col, row] + (alpha_l*left + alpha_r*right + alpha_d*down + alpha_u*up)/c_v
-        
-
-        # c_v = self.rho[col, row]*self.cp[col, row]
-        # q = -alpha * self.u[col, row] + alpha_l*left + alpha_r*right + alpha_d*down + alpha_u*up
-        # self.u_next[col, row] = self.u[col, row] + self.c * q / c_v
-
-        # d_left  = self.D[col - 1, row]
-        # d_right = self.D[col + 1, row]
-        # d_down  = self.D[col, row - 1]
-        # d_up    = self.D[col, row + 1]
-        # hor_outer = d_right-d_left
-        # ver_outer = d_up-d_down
-        # four_d = 4*self.D[col,row]
-
-        # self.u_next[col, row] = self.u[col, row] + self.dt/(4*self.dx**2) * ( 
-        #     -4*four_d*             self.u[col ,    row] + \
-        #     (four_d + hor_outer) * self.u[col + 1, row] + \
-        #     (four_d - hor_outer) * self.u[col - 1, row] + \
-        #     (four_d + ver_outer) * self.u[col, row + 1] + \
-        #     (four_d - ver_outer) * self.u[col, row - 1]
-        # )
+        denom = 1 + alpha*self.c
+        weight_l = alpha_l * self.c
+        weight_r = alpha_r * self.c
+        weight_u = alpha_u * self.c
+        weight_d = alpha_d * self.c
 
         err = 9999.0
         jac_it = 0
-        denom = 1 + alpha*self.c
-        weight_l = alpha_l * self.c / denom
-        weight_r = alpha_r * self.c / denom
-        weight_u = alpha_u * self.c / denom
-        weight_d = alpha_d * self.c / denom
-        weight = alpha*self.c / denom
+
         while err > self.tol:
-            self.u_next[col, row] = self.u[col,row] / denom\
+            self.u_temp[col, row] = (self.u[col,row] \
                 + weight_l * self.u_next[col-1, row]\
                 + weight_r * self.u_next[col+1, row]\
                 + weight_d * self.u_next[col, row-1]\
-                + weight_u * self.u_next[col, row+1]
-            err = ti.abs(self.u_next[col, row] - self.u[col, row])
-
+                + weight_u * self.u_next[col, row+1]) / denom
+            err = ti.abs(self.u_temp[col, row] - self.u_next[col, row])
+            self.u_next[col, row] = self.u_temp[col, row]
             jac_it = jac_it+1
-            if row==self.n-2 or col == self.n-2 or row == 1 or col == 1:
-                break
-            if jac_it > 1000:
-                print(f"Taking a long time to converge {col},{row}:{jac_it}!")
         
     def benchmark_explicit(self, n_tests):
         print("Starting benchmark...")
@@ -387,17 +351,17 @@ class Solver:
 
 if __name__ == '__main__':
     ti.init(arch=ti.cuda, default_fp=ti.f32)
-    D = 0.000002 # [m2/s]
-    dx = 0.01 # [m]
-    dt = dx**2 / (4*D) # [s]
-    print(dt)
-    p = 8
+    D = np.max(mat_diffs) # [m2/s]
+    dx = 0.0025 # [m]
+    dt = dx**2 / (4*D*32) # [s]
+    print(f"Timestep: {int(dt*1000):01d}ms")
+    p = 10
     n = 2**p
 
     boundary_values = [
         # [-1, -1],
         [1, 1],
-        [0, 0]
+        [1, 0]
     ]
 
     colormap = [
@@ -445,7 +409,7 @@ if __name__ == '__main__':
             u = solver.u.to_numpy()
             u_col = solver.colors.to_numpy()[:solver.n,:solver.n]
             plt.imshow(np.clip(np.swapaxes(u_col, 0,1), 0, 1.0))
-            plt.contour(X, Y, np.swapaxes(u,0,1), colors='black', levels=np.arange(273.15 -6,273.15+21,0.25), linewidths=(0.25, 0.25, 0.25, 0.25, 1))
+            plt.contour(X, Y, np.swapaxes(u,0,1), colors='black', levels=np.arange(273.15 -6,273.15+21,0.25), linewidths=(0.25))#, linewidths=(0.25, 0.25, 0.25, 1))
             ax = plt.gca()
             ax.invert_yaxis()
             plt.axis("off")
