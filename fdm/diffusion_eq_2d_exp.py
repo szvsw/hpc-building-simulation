@@ -45,7 +45,7 @@ class Solver:
         self.dx = dx
         self.L  = dx * (n - 1)
         self.dt = dt
-        self.c  = self.dt / self.dx**2
+        self.c  = self.dt / (self.dx**2)
         self.updates_per_batch = updates_per_batch
         self.tol = 0.001
 
@@ -53,11 +53,14 @@ class Solver:
         self.t = ti.field(dtype=float, shape=())
 
         """Material Data Fields"""
-        self.mat = ti.field(dtype=ti.i8, shape=(n,n))
-        self.k  = ti.field(dtype=float, shape=(n,n))
-        self.rho  = ti.field(dtype=float, shape=(n,n))
-        self.cp  = ti.field(dtype=float, shape=(n,n))
-        self.D  = ti.field(dtype=float, shape=(n,n))
+        self.mat    = ti.field(dtype=ti.i8, shape=(n,n))
+        self.k      = ti.field(dtype=float, shape=(n,n))
+        self.k_mid  = ti.field(dtype=float, shape=(n,n,4)) # left, right, down, up
+        self.k_sum  = ti.field(dtype=float, shape=(n,n))   # sum of k_mid
+        self.rho    = ti.field(dtype=float, shape=(n,n))
+        self.cp     = ti.field(dtype=float, shape=(n,n))
+        self.cv     = ti.field(dtype=float, shape=(n,n))   # self.rho * self.cp
+        self.D      = ti.field(dtype=float, shape=(n,n))   # self.k / self.cv
 
         """BC Fields"""
         self.boundaries = ti.field(dtype=float, shape=(2,2))
@@ -65,7 +68,7 @@ class Solver:
         """Solution Fields"""
         self.u = ti.field(dtype=float, shape=(n,n))
         self.u_next = ti.field(dtype=float, shape=(n,n))
-        self.u_temp = ti.field(dtype=float, shape=(n,n))
+        self.u_tmp = ti.field(dtype=float, shape=(n,n))
         self.q = ti.field(dtype=float, shape=(n,n))
 
         """Rendering Fields"""
@@ -85,6 +88,7 @@ class Solver:
         self.t[None] = 0
         self.populate_u0()
         self.populate_D(D)
+        self.precompute_coeffs()
         self.init_boundary_values(boundary_values)
         self.init_colormap(colormap)
         self.load_material_colors(D_max=D)
@@ -112,7 +116,7 @@ class Solver:
         for k in ti.grouped(self.u):
             self.u[k] = self.u_min + self.u_range * k.x / self.n
             self.u[k] = self.u_min + ti.random()*self.u_range
-            self.u[k] = self.u_min 
+            # self.u[k] = self.u_min 
             # self.u[k] = self.u_min + self.u_range/2 + ti.abs(0.5 - k.x/self.n)*self.u_range - ti.abs(0.5 - k.y/self.n)*self.u_range
 
             """Prepare for Jacobi/Gauss-Seidel"""
@@ -170,6 +174,27 @@ class Solver:
                 self.rho[col, row] = mat_defs[mat_ids['channel'], 2]
                 self.D[col, row] = mat_diffs[mat_ids['channel']]
 
+
+    @ti.kernel
+    def precompute_coeffs(self):
+        self.k_mid.fill(-1) # -1 on boundaries for now
+        self.k_sum.fill(0)
+        for col, row in self.cv:
+            self.cv[col, row] = self.rho[col,row]*self.cp[col,row]
+            # TODO: migrate to multi-dim final slot for col/row
+            k = self.k[col, row]
+            if col > 0:
+                self.k_mid[col, row, 0] = (k + self.k[col - 1, row])/2
+                self.k_sum[col, row] += self.k_mid[col, row, 0]
+            if col < self.n - 1:
+                self.k_mid[col, row, 1] = (k + self.k[col + 1, row])/2
+                self.k_sum[col, row] += self.k_mid[col, row, 1]
+            if row > 0:
+                self.k_mid[col, row, 2] = (k + self.k[col, row - 1])/2
+                self.k_sum[col, row] += self.k_mid[col, row, 2]
+            if row < self.n - 1:
+                self.k_mid[col, row, 3] = (k + self.k[col, row + 1])/2
+                self.k_sum[col, row] += self.k_mid[col, row, 3]
     @ti.kernel
     def load_material_colors(self, D_max: float):
         # TODO: make mat colors assignable
@@ -199,6 +224,7 @@ class Solver:
     def explicit_batch(self):
         for i in range(self.updates_per_batch):
             self.explicit_step()
+        self.compute_q()
 
     @ti.kernel
     def explicit_step(self):
@@ -208,13 +234,15 @@ class Solver:
                 self.handle_boundary_explicit(col, row)
             else:
                 self.handle_internal_jacobi(col, row)
-        ti.sync()
+        # ti.sync()
 
         """Shift"""
         for node in ti.grouped(self.u_next):
             self.u[node] = self.u_next[node]
-        ti.sync()
+        # ti.sync()
 
+    @ti.kernel
+    def compute_q(self):
         """Compute Q"""
         self.q.fill(0.0)
         for col, row in self.u:
@@ -285,31 +313,35 @@ class Solver:
                 self.u_next[col, row] = (1 - mult*alpha) * self.u[col, row] + alpha * (left + right + up + down)
     @ti.func 
     def handle_internal_jacobi(self, col, row):
-        k = self.k[col, row]
-        # TODO: Move these static computations into a precomputed field
-        alpha_l = (self.k[col - 1, row] + k)/2
-        alpha_r = (self.k[col + 1, row] + k)/2
-        alpha_d = (self.k[col, row - 1] + k)/2
-        alpha_u = (self.k[col, row + 1] + k)/2
-        alpha = alpha_l + alpha_r + alpha_d + alpha_u
-        denom = 1 + alpha*self.c
-        weight_l = alpha_l * self.c
-        weight_r = alpha_r * self.c
-        weight_u = alpha_u * self.c
-        weight_d = alpha_d * self.c
+        # k = self.k[col, row]
+        # # # TODO: Move these static computations into a precomputed field
+        # alpha_l = (self.k[col - 1, row] + k)/2
+        # alpha_r = (self.k[col + 1, row] + k)/2
+        # alpha_d = (self.k[col, row - 1] + k)/2
+        # alpha_u = (self.k[col, row + 1] + k)/2
+        alpha_l = self.k_mid[col, row, 0]
+        alpha_r = self.k_mid[col, row, 1]
+        alpha_d = self.k_mid[col, row, 2]
+        alpha_u = self.k_mid[col, row, 3]
+
+        # alpha = alpha_l + alpha_r + alpha_d + alpha_u
+        alpha = self.k_sum[col, row]
+        hcp = self.c / (self.cv[col, row])
+        denom = 1 + alpha*hcp
 
         err = 9999.0
-        jac_it = 0
 
         while err > self.tol:
-            self.u_temp[col, row] = (self.u[col,row] \
-                + weight_l * self.u_next[col-1, row]\
-                + weight_r * self.u_next[col+1, row]\
-                + weight_d * self.u_next[col, row-1]\
-                + weight_u * self.u_next[col, row+1]) / denom
-            err = ti.abs(self.u_temp[col, row] - self.u_next[col, row])
-            self.u_next[col, row] = self.u_temp[col, row]
-            jac_it = jac_it+1
+            self.u_tmp[col, row] = (
+                self.u[col,row] + (
+                      alpha_l * self.u_next[col-1, row]\
+                    + alpha_r * self.u_next[col+1, row]\
+                    + alpha_d * self.u_next[col, row-1]\
+                    + alpha_u * self.u_next[col, row+1]
+                ) * hcp
+            ) / denom
+            err = ti.abs(self.u_tmp[col, row] - self.u_next[col, row])
+            self.u_next[col, row] = self.u_tmp[col, row]
         
     def benchmark_explicit(self, n_tests):
         print("Starting benchmark...")
@@ -387,7 +419,7 @@ if __name__ == '__main__':
     D = np.max(mat_diffs) # [m2/s]
     dx = 0.01 # [m]
     # dt = dx**2 / (4*D) # [s]
-    dt = 2000 # [s]
+    dt = 1 # [s]
     print(f"Timestep: {int(dt*1000):01d}ms")
     p = 8
     n = 2**p
@@ -433,9 +465,10 @@ if __name__ == '__main__':
         canvas.set_image(solver.colors)
 
         solver.explicit_batch()
+        # time.sleep(10)
         # window.save_image(f"./week_5_fd_pde/images_4/{it:05d}.png")
-        if it%200 == 0:
-            solver.plot_isotherms()
+        # if it%200 == 0:
+        #     solver.plot_isotherms()
         if it*solver.updates_per_batch*solver.dt/(3600*24) > t_marker:
             print(f"Completed day {t_marker}")
             t_marker +=1
