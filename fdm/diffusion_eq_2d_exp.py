@@ -372,6 +372,9 @@ if __name__ == '__main__':
     p = 10
     n = 2**p
 
+    u_range = 25
+    u_min = 273.15 + (-5)
+
     boundary_values = [
         # [-1, -1],
         [1, 1],
@@ -386,14 +389,9 @@ if __name__ == '__main__':
         [244,109,69],
         [169,23,69]
     ]
-    jet = plt.cm.get_cmap("jet")
+    jet = plt.colormaps["jet"]
     colormap = jet(np.arange(jet.N))*255
 
-
-
-
-    u_range = 25
-    u_min = 273.15 + (-5)
 
     solver = Solver(dt, dx, n, D, boundary_values, colormap, u_min, u_range, updates_per_batch=100)
     solver.check_explicit_cfl()
