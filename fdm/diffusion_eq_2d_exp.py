@@ -7,11 +7,8 @@ import matplotlib.pyplot as plt
 """
 Material Defs
 K [W/mK], Cp [J/kgK], rho [kg/m3]
-
-J s^-1 m^-1 K^-1 J^-1 kg K kg^-1 m3
-J J^-1  K^-1 K kg kg^-1  m3 m^-1 s^-1 
-m2 m s^-1  
 """
+
 print(f"--- Material Library ---")
 mat_names = [
     "outer",
@@ -80,9 +77,11 @@ class Solver:
 
         """Inits"""
         self.t[None] = 0
+        self.populate_u0()
         self.populate_D(D)
         self.init_boundary_values(boundary_values)
         self.init_colormap(colormap)
+        self.load_material_colors(D_max=D)
 
 
 
@@ -101,25 +100,20 @@ class Solver:
     def init_colormap(self, colormap):
         for i, color in enumerate(colormap):
             self.colormap_field[i] = ti.Vector(color)
+
     @ti.kernel
-    def populate_D(self, D: float):
+    def populate_u0(self):
         for k in ti.grouped(self.u):
             self.u[k] = self.u_min + self.u_range * k.x / self.n
             self.u[k] = self.u_min + ti.random()*self.u_range
             # self.u[k] = self.u_min + self.u_range/2 + ti.abs(0.5 - k.x/self.n)*self.u_range - ti.abs(0.5 - k.y/self.n)*self.u_range
 
+            """Prepare for Jacobi/Gauss-Seidel"""
             self.u_next[k] = self.u[k]
-        self.D.fill(D)
 
-        mat_colors = ti.Matrix(
-            [
-                [ti.random(), ti.random(), ti.random()],
-                [ti.random(), ti.random(), ti.random()],
-                [ti.random(), ti.random(), ti.random()],
-                [ti.random(), ti.random(), ti.random()],
-                [ti.random(), ti.random(), ti.random()]
-            ]
-        )
+    @ti.kernel
+    def populate_D(self, D: float):
+        self.D.fill(D)
 
         for col, row in self.D:
             if row < 3/8 * self.n:
@@ -168,7 +162,22 @@ class Solver:
                 self.cp[col, row] = mat_defs[mat_ids['channel'], 1]
                 self.rho[col, row] = mat_defs[mat_ids['channel'], 2]
                 self.D[col, row] = mat_diffs[mat_ids['channel']]
-            gray_scale = (self.D[col, row] - 0.01*D) / (0.99*D)
+
+    @ti.kernel
+    def load_material_colors(self, D_max: float):
+        # TODO: make mat colors assignable
+        mat_colors = ti.Matrix(
+            [
+                [ti.random(), ti.random(), ti.random()],
+                [ti.random(), ti.random(), ti.random()],
+                [ti.random(), ti.random(), ti.random()],
+                [ti.random(), ti.random(), ti.random()],
+                [ti.random(), ti.random(), ti.random()]
+            ]
+        )
+
+        for col, row in self.D:
+            gray_scale = (self.D[col, row] - 0.01*D_max) / (0.99*D_max)
             self.colors[col+self.n, row] = ti.Vector([mat_colors[self.mat[col, row], 0], mat_colors[self.mat[col, row], 1], mat_colors[self.mat[col, row], 2]])
             self.colors[col+self.n,row+self.n] = ti.Vector([gray_scale, gray_scale, gray_scale])
 
