@@ -75,6 +75,8 @@ class Solver:
         self.colors   = ti.Vector.field(3, dtype=ti.f32, shape=(2*n, 2*n))
         self.colormap_field = ti.Vector.field(3, dtype=ti.f32, shape=len(colormap))
 
+        self.fig = plt.figure()
+
 
         """Inits"""
         self.t[None] = 0
@@ -344,6 +346,18 @@ class Solver:
             self.colors[i,j+self.n].x = ti.cast((self.colormap_field[level_idx].x * (1-colorphase) + colorphase*self.colormap_field[level_idx+1].x)/255, ti.float32)
             self.colors[i,j+self.n].y = ti.cast((self.colormap_field[level_idx].y * (1-colorphase) + colorphase*self.colormap_field[level_idx+1].y)/255, ti.float32)
             self.colors[i,j+self.n].z = ti.cast((self.colormap_field[level_idx].z * (1-colorphase) + colorphase*self.colormap_field[level_idx+1].z)/255, ti.float32)
+    
+    def plot_isotherms(self):
+            plt.cla()
+            u = self.u.to_numpy()
+            u_col = self.colors.to_numpy()[:self.n,:self.n]
+            plt.imshow(np.clip(np.swapaxes(u_col, 0,1), 0, 1.0))
+            plt.contour(X, Y, np.swapaxes(u,0,1), colors='black', levels=np.arange(273.15 -6,273.15+21,0.25), linewidths=(0.25))#, linewidths=(0.25, 0.25, 0.25, 1))
+            ax = plt.gca()
+            ax.invert_yaxis()
+            plt.axis("off")
+            plt.draw()
+            plt.pause(0.01)
 
 
 
@@ -395,7 +409,6 @@ if __name__ == '__main__':
     it = 0
     t_marker = 1
     
-    fig = plt.figure()
     X, Y = np.meshgrid(np.arange(solver.n), np.arange(solver.n), indexing="xy")
     while window.running:
 
@@ -405,16 +418,7 @@ if __name__ == '__main__':
         solver.explicit_batch()
         # window.save_image(f"./week_5_fd_pde/images_4/{it:05d}.png")
         if it%200 == 0:
-            plt.cla()
-            u = solver.u.to_numpy()
-            u_col = solver.colors.to_numpy()[:solver.n,:solver.n]
-            plt.imshow(np.clip(np.swapaxes(u_col, 0,1), 0, 1.0))
-            plt.contour(X, Y, np.swapaxes(u,0,1), colors='black', levels=np.arange(273.15 -6,273.15+21,0.25), linewidths=(0.25))#, linewidths=(0.25, 0.25, 0.25, 1))
-            ax = plt.gca()
-            ax.invert_yaxis()
-            plt.axis("off")
-            plt.draw()
-            plt.pause(0.01)
+            solver.plot_isotherms()
         if it*solver.updates_per_batch*solver.dt/(3600*24) > t_marker:
             print(f"Completed day {t_marker}")
             t_marker +=1
