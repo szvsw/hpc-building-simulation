@@ -17,8 +17,8 @@ mat_names = [
     "xps"
 ]
 mat_defs = np.array([
-    [3, 3000, 1000], 
-    [6, 3000, 1000],
+    [3, 100, 100], 
+    [6, 100, 100],
     [2.3, 1000, 2300], 
     [0.039, 1450, 35],
 ])
@@ -73,6 +73,12 @@ class Solver:
         self.colormap_field = ti.Vector.field(3, dtype=ti.f32, shape=len(colormap))
 
         self.fig = plt.figure()
+        self.X, self.Y = np.meshgrid(np.arange(self.n), np.arange(self.n), indexing="xy")
+        d = self.cp.to_numpy()
+        dr = np.roll(d, 1,axis=0)
+        du = np.roll(d, 1,axis=1)
+        d = np.logical_or(du > d, dr > d)
+        self.edges = d
 
 
         """Inits"""
@@ -106,6 +112,7 @@ class Solver:
         for k in ti.grouped(self.u):
             self.u[k] = self.u_min + self.u_range * k.x / self.n
             self.u[k] = self.u_min + ti.random()*self.u_range
+            self.u[k] = self.u_min 
             # self.u[k] = self.u_min + self.u_range/2 + ti.abs(0.5 - k.x/self.n)*self.u_range - ti.abs(0.5 - k.y/self.n)*self.u_range
 
             """Prepare for Jacobi/Gauss-Seidel"""
@@ -223,7 +230,8 @@ class Solver:
             if row < self.n - 1:
                 ver += (self.u[col, row + 1] - self.u[col, row]) * (self.k[col, row] + self.k[col, row + 1])/2
             # TODO: precompute some of these consts.
-            self.q[col, row] = ti.log(ti.sqrt(ti.static(0.25/self.dx**2)*((hor**2 + ver**2))))/ti.static(ti.log(175))
+            # self.q[col, row] = ti.log(ti.sqrt(ti.static(0.25/self.dx**2)*((hor**2 + ver**2))))/ti.static(ti.log(175))
+            self.q[col, row] = ti.sqrt(ti.static(0.25/self.dx**2)*((hor**2 + ver**2)))/175
 
     @ti.func
     def handle_boundary_explicit(self, col, row):
@@ -361,7 +369,9 @@ class Solver:
             u = self.u.to_numpy()
             u_col = self.colors.to_numpy()[:self.n,:self.n]
             plt.imshow(np.clip(np.swapaxes(u_col, 0,1), 0, 1.0))
-            plt.contour(X, Y, np.swapaxes(u,0,1), colors='black', levels=np.arange(273.15 -6,273.15+21,0.25), linewidths=(0.25))#, linewidths=(0.25, 0.25, 0.25, 1))
+            plt.contour(self.X, self.Y, np.swapaxes(u,0,1), colors='black', levels=np.arange(273.15 -5,273.15+21,0.2), linewidths=(1, 0.25, 0.25, 0.25, 0.25))#, linewidths=(0.25, 0.25, 0.25, 1)), linewidths=(0.25, 0.25, 0.25, 0.25, 1))
+            
+
             ax = plt.gca()
             ax.invert_yaxis()
             plt.axis("off")
@@ -375,10 +385,11 @@ class Solver:
 if __name__ == '__main__':
     ti.init(arch=ti.cuda, default_fp=ti.f32)
     D = np.max(mat_diffs) # [m2/s]
-    dx = 0.0025 # [m]
-    dt = dx**2 / (4*D*32) # [s]
+    dx = 0.01 # [m]
+    # dt = dx**2 / (4*D) # [s]
+    dt = 2000 # [s]
     print(f"Timestep: {int(dt*1000):01d}ms")
-    p = 10
+    p = 8
     n = 2**p
 
     u_range = 25
@@ -403,20 +414,19 @@ if __name__ == '__main__':
 
 
     solver = Solver(dt, dx, n, D, boundary_values, colormap, u_min, u_range, updates_per_batch=100)
-    solver.check_explicit_cfl()
+    # solver.check_explicit_cfl()
     # solver.benchmark_explicit(n_tests=100)
 
     """
     Render setup
     """
     window_scale_factor = 2
-    window = ti.ui.Window("2D Diffusion", (window_scale_factor*2*n,window_scale_factor*2*n))
+    window = ti.ui.Window("2D Diffusion", (int(window_scale_factor*2*n),int(window_scale_factor*2*n)))
     canvas = window.get_canvas()
 
     it = 0
     t_marker = 1
     
-    X, Y = np.meshgrid(np.arange(solver.n), np.arange(solver.n), indexing="xy")
     while window.running:
 
         solver.update_colors()
