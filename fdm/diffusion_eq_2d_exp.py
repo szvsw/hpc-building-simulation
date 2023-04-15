@@ -47,20 +47,22 @@ class Solver:
         self.dt = dt
         self.c  = self.dt / (self.dx**2)
         self.updates_per_batch = updates_per_batch
-        self.tol = 0.001
+        self.tol = 0.0001
 
         "Time Field"
         self.t = ti.field(dtype=float, shape=())
 
         """Material Data Fields"""
-        self.mat    = ti.field(dtype=ti.i8, shape=(n,n))
-        self.k      = ti.field(dtype=float, shape=(n,n))
-        self.k_mid  = ti.field(dtype=float, shape=(n,n,4)) # left, right, down, up
-        self.k_sum  = ti.field(dtype=float, shape=(n,n))   # sum of k_mid
-        self.rho    = ti.field(dtype=float, shape=(n,n))
-        self.cp     = ti.field(dtype=float, shape=(n,n))
-        self.cv     = ti.field(dtype=float, shape=(n,n))   # self.rho * self.cp
-        self.D      = ti.field(dtype=float, shape=(n,n))   # self.k / self.cv
+        self.mat     = ti.field(dtype=ti.i8, shape=(n,n))
+        self.k       = ti.field(dtype=float, shape=(n,n))
+        self.k_mid   = ti.field(dtype=float, shape=(n,n,4)) # left, right, down, up
+        self.k_sum   = ti.field(dtype=float, shape=(n,n))   # sum of k_mid
+        self.rho     = ti.field(dtype=float, shape=(n,n))
+        self.cp      = ti.field(dtype=float, shape=(n,n))
+        self.cv      = ti.field(dtype=float, shape=(n,n))   # self.rho * self.cp
+        self.c_cvinv = ti.field(dtype=float, shape=(n,n))   # self.rho * self.cp
+        self.denom   = ti.field(dtype=float, shape=(n,n))   # self.rho * self.cp
+        self.D       = ti.field(dtype=float, shape=(n,n))   # self.k / self.cv
 
         """BC Fields"""
         self.boundaries = ti.field(dtype=float, shape=(2,2))
@@ -75,37 +77,38 @@ class Solver:
         self.colors   = ti.Vector.field(3, dtype=ti.f32, shape=(2*n, 2*n))
         self.colormap_field = ti.Vector.field(3, dtype=ti.f32, shape=len(colormap))
 
-        self.fig = plt.figure()
-        self.X, self.Y = np.meshgrid(np.arange(self.n), np.arange(self.n), indexing="xy")
-        d = self.cp.to_numpy()
-        dr = np.roll(d, 1,axis=0)
-        du = np.roll(d, 1,axis=1)
-        d = np.logical_or(du > d, dr > d)
-        self.edges = d
 
 
         """Inits"""
         self.t[None] = 0
+        self.init_boundary_values(boundary_values)
         self.populate_u0()
         self.populate_D(D)
         self.precompute_coeffs()
-        self.init_boundary_values(boundary_values)
         self.init_colormap(colormap)
         self.load_material_colors(D_max=D)
+
+        self.fig = plt.figure()
+        self.X, self.Y = np.meshgrid(np.arange(self.n), np.arange(self.n), indexing="xy")
+        d = self.cp.to_numpy().T
+        dr = np.roll(d, 1,axis=0)
+        du = np.roll(d, 1,axis=1)
+        d = np.logical_or(du != d, dr != d)
+        self.edges = d*255
 
 
 
 
     def init_boundary_values(self, boundary_values):
         # NB: this does not init the cells, just the reference values!
-        for col in range(2):
-            for row in range(2):
-                bound = np.array(boundary_values)[col, row]
+        for ver_vs_hor in range(2):
+            for a_vs_b in range(2):
+                bound = np.array(boundary_values)[ver_vs_hor , a_vs_b]
                 if bound >= 0:
                     bound = bound*self.u_range + self.u_min
                 else:
                     bound = -1
-                self.boundaries[col, row] = bound
+                self.boundaries[ver_vs_hor, a_vs_b] = bound
 
     def init_colormap(self, colormap):
         for i, color in enumerate(colormap):
@@ -116,7 +119,7 @@ class Solver:
         for k in ti.grouped(self.u):
             self.u[k] = self.u_min + self.u_range * k.x / self.n
             self.u[k] = self.u_min + ti.random()*self.u_range
-            # self.u[k] = self.u_min 
+            self.u[k] = self.u_min 
             # self.u[k] = self.u_min + self.u_range/2 + ti.abs(0.5 - k.x/self.n)*self.u_range - ti.abs(0.5 - k.y/self.n)*self.u_range
 
             """Prepare for Jacobi/Gauss-Seidel"""
@@ -128,8 +131,6 @@ class Solver:
 
         for col, row in self.D:
             if row < 3/8 * self.n:
-                self.D[col, row] = 0.5*D
-
                 self.mat[col, row] = ti.cast(mat_ids['outer'], ti.i8)
 
                 self.k[col, row] = mat_defs[mat_ids['outer'], 0]
@@ -137,8 +138,6 @@ class Solver:
                 self.rho[col, row] = mat_defs[mat_ids['outer'], 2]
                 self.D[col, row] = mat_diffs[mat_ids['outer']]
             elif row < 4/8 * self.n:
-                self.D[col, row] = 0.1*D
-
                 self.mat[col, row] = ti.cast(mat_ids['xps'], ti.i8)
 
                 self.k[col, row] = mat_defs[mat_ids['xps'], 0]
@@ -146,9 +145,6 @@ class Solver:
                 self.rho[col, row] = mat_defs[mat_ids['xps'], 2]
                 self.D[col, row] = mat_diffs[mat_ids['xps']]
             elif row < 5/8 * self.n:
-                self.D[col, row] = 0.01*D
-                self.D[col, row] = 0.1*D
-
                 self.mat[col, row] = ti.cast(mat_ids['concrete'], ti.i8)
 
                 self.k[col, row] = mat_defs[mat_ids['concrete'], 0]
@@ -156,8 +152,6 @@ class Solver:
                 self.rho[col, row] = mat_defs[mat_ids['concrete'], 2]
                 self.D[col, row] = mat_diffs[mat_ids['concrete']]
             else:
-                self.D[col, row] = 0.5*D
-
                 self.mat[col, row] = ti.cast(mat_ids['outer'], ti.i8)
 
                 self.k[col, row] = mat_defs[mat_ids['outer'], 0]
@@ -165,8 +159,6 @@ class Solver:
                 self.rho[col, row] = mat_defs[mat_ids['outer'], 2]
                 self.D[col, row] = mat_diffs[mat_ids['outer']]
             if (row >= 3/8*self.n and row <= 5/8*self.n) and ((col > 6/21*self.n and col < 7/21*self.n) or (col > 10/21*self.n and col < 11/21*self.n) or (col > 14/21*self.n and col < 15/21*self.n)):
-                self.D[col, row] = D
-
                 self.mat[col, row] = ti.cast(mat_ids['channel'], ti.i8)
 
                 self.k[col, row] = mat_defs[mat_ids['channel'], 0]
@@ -174,27 +166,57 @@ class Solver:
                 self.rho[col, row] = mat_defs[mat_ids['channel'], 2]
                 self.D[col, row] = mat_diffs[mat_ids['channel']]
 
+            if col == 0 or row == 0 or col == self.n-1 or row == self.n-1:
+                boundary = 0.0
+                if col == 0 or col == self.n - 1:
+                    boundary = self.boundaries[0, int(col / (self.n-1))]
+                if row == 0 or row == self.n - 1:
+                    boundary = self.boundaries[1, int(row / (self.n-1))]
+                
+                if boundary < 0:
+                    """Adiabatic"""
+                    self.mat[col, row] = ti.cast(-1, ti.i8)
+
+                    self.k[col, row] = 0.000001
+                    self.cp[col, row] = 1.0
+                    self.rho[col, row] = 1.0
+                    self.D[col, row] = 0.0
+
 
     @ti.kernel
     def precompute_coeffs(self):
         self.k_mid.fill(-1) # -1 on boundaries for now
         self.k_sum.fill(0)
         for col, row in self.cv:
-            self.cv[col, row] = self.rho[col,row]*self.cp[col,row]
+            self.cv[col, row] = self.rho[col, row]*self.cp[col, row]
+            self.c_cvinv[col, row] = self.c/self.cv[col, row]
             # TODO: migrate to multi-dim final slot for col/row
             k = self.k[col, row]
             if col > 0:
-                self.k_mid[col, row, 0] = (k + self.k[col - 1, row])/2
-                self.k_sum[col, row] += self.k_mid[col, row, 0]
+                if col == 1 and self.boundaries[0,0] < 0:
+                    self.k_mid[col, row, 0] = 0 # no heat flow from left into right cell
+                else:
+                    self.k_mid[col, row, 0] = (k + self.k[col - 1, row])/2
+                    self.k_sum[col, row] += self.k_mid[col, row, 0]
             if col < self.n - 1:
-                self.k_mid[col, row, 1] = (k + self.k[col + 1, row])/2
-                self.k_sum[col, row] += self.k_mid[col, row, 1]
+                if col == self.n-2 and self.boundaries[0,1] < 0:
+                    self.k_mid[col, row, 1] = 0 # no heat flow from right into left cell
+                else: 
+                    self.k_mid[col, row, 1] = (k + self.k[col + 1, row])/2
+                    self.k_sum[col, row] += self.k_mid[col, row, 1]
             if row > 0:
-                self.k_mid[col, row, 2] = (k + self.k[col, row - 1])/2
-                self.k_sum[col, row] += self.k_mid[col, row, 2]
+                if row == 1 and self.boundaries[1,0] < 0:
+                    self.k_mid[col, row, 2] = 0 # no heat flow from down into up cell
+                else:
+                    self.k_mid[col, row, 2] = (k + self.k[col, row - 1])/2
+                    self.k_sum[col, row] += self.k_mid[col, row, 2]
             if row < self.n - 1:
-                self.k_mid[col, row, 3] = (k + self.k[col, row + 1])/2
-                self.k_sum[col, row] += self.k_mid[col, row, 3]
+                if row == self.n-2 and self.boundaries[1,1] < 0:
+                    self.k_mid[col, row, 3] = 0 # no heat flow from up into down cell
+                else:
+                    self.k_mid[col, row, 3] = (k + self.k[col, row + 1])/2
+                    self.k_sum[col, row] += self.k_mid[col, row, 3]
+            self.denom[col, row] = 1 / (1 + self.k_sum[col, row]*self.c_cvinv[col, row])
     @ti.kernel
     def load_material_colors(self, D_max: float):
         # TODO: make mat colors assignable
@@ -268,49 +290,11 @@ class Solver:
             if boundary >= 0: # TODO: create a separate flag
                 """Prescriptive"""
                 self.u_next[col, row] = boundary
-            else:
-                """Adiabatic"""
-                mult = 1.0
-                alpha = self.D[col, row]*self.c
-                right = 0.0
-                left = 0.0
-                up = 0.0
-                down = 0.0
-                if col > 0:
-                    left  = self.u[col - 1, row]
-                else:
-                    right = self.u[col + 1, row]
-                if row > 0:
-                    down = self.u[col, row - 1]
-                    mult = mult + 1
-                if row < self.n-1:
-                    up = self.u[col, row + 1]
-                    mult = mult = mult + 1
-                self.u_next[col, row] = (1 - mult*alpha) * self.u[col, row] + alpha * (left + right + up + down)
         else:
             boundary = self.boundaries[1, int(row / (self.n-1))]
             if boundary >= 0: # TODO: create a separate flag
                 """Prescriptive"""
                 self.u_next[col, row] = boundary
-            else:
-                """Adiabatic"""
-                mult = 1.0
-                alpha = self.D[col, row]*self.c
-                right = 0.0
-                left = 0.0
-                up = 0.0
-                down = 0.0
-                if row > 0:
-                    down = self.u[col, row - 1]
-                else:
-                    up = self.u[col, row + 1]
-                if col > 0:
-                    left = self.u[col - 1, row]
-                    mult = mult + 1
-                if col < self.n-1:
-                    right = self.u[col + 1, row]
-                    mult = mult = mult + 1
-                self.u_next[col, row] = (1 - mult*alpha) * self.u[col, row] + alpha * (left + right + up + down)
     @ti.func 
     def handle_internal_jacobi(self, col, row):
         # k = self.k[col, row]
@@ -319,27 +303,27 @@ class Solver:
         # alpha_r = (self.k[col + 1, row] + k)/2
         # alpha_d = (self.k[col, row - 1] + k)/2
         # alpha_u = (self.k[col, row + 1] + k)/2
-        alpha_l = self.k_mid[col, row, 0]
-        alpha_r = self.k_mid[col, row, 1]
-        alpha_d = self.k_mid[col, row, 2]
-        alpha_u = self.k_mid[col, row, 3]
+        k_l = self.k_mid[col, row, 0]
+        k_r = self.k_mid[col, row, 1]
+        k_d = self.k_mid[col, row, 2]
+        k_u = self.k_mid[col, row, 3]
 
         # alpha = alpha_l + alpha_r + alpha_d + alpha_u
-        alpha = self.k_sum[col, row]
-        hcp = self.c / (self.cv[col, row])
-        denom = 1 + alpha*hcp
+        # k = self.k_sum[col, row]
+        hcp = self.c_cvinv[col, row] #self.c / (self.cv[col, row])
+        denom = self.denom[col, row] # 1 + k*hcp
 
         err = 9999.0
 
         while err > self.tol:
             self.u_tmp[col, row] = (
                 self.u[col,row] + (
-                      alpha_l * self.u_next[col-1, row]\
-                    + alpha_r * self.u_next[col+1, row]\
-                    + alpha_d * self.u_next[col, row-1]\
-                    + alpha_u * self.u_next[col, row+1]
+                      k_l * self.u_next[col-1, row]\
+                    + k_r * self.u_next[col+1, row]\
+                    + k_d * self.u_next[col, row-1]\
+                    + k_u * self.u_next[col, row+1]
                 ) * hcp
-            ) / denom
+            ) * denom
             err = ti.abs(self.u_tmp[col, row] - self.u_next[col, row])
             self.u_next[col, row] = self.u_tmp[col, row]
         
@@ -402,7 +386,6 @@ class Solver:
             u_col = self.colors.to_numpy()[:self.n,:self.n]
             plt.imshow(np.clip(np.swapaxes(u_col, 0,1), 0, 1.0))
             plt.contour(self.X, self.Y, np.swapaxes(u,0,1), colors='black', levels=np.arange(273.15 -5,273.15+21,0.2), linewidths=(1, 0.25, 0.25, 0.25, 0.25))#, linewidths=(0.25, 0.25, 0.25, 1)), linewidths=(0.25, 0.25, 0.25, 0.25, 1))
-            
 
             ax = plt.gca()
             ax.invert_yaxis()
@@ -452,7 +435,7 @@ if __name__ == '__main__':
     """
     Render setup
     """
-    window_scale_factor = 2
+    window_scale_factor = 1.5
     window = ti.ui.Window("2D Diffusion", (int(window_scale_factor*2*n),int(window_scale_factor*2*n)))
     canvas = window.get_canvas()
 
@@ -465,10 +448,9 @@ if __name__ == '__main__':
         canvas.set_image(solver.colors)
 
         solver.explicit_batch()
-        # time.sleep(10)
         # window.save_image(f"./week_5_fd_pde/images_4/{it:05d}.png")
-        # if it%200 == 0:
-        #     solver.plot_isotherms()
+        if it%200 == 0:
+            solver.plot_isotherms()
         if it*solver.updates_per_batch*solver.dt/(3600*24) > t_marker:
             print(f"Completed day {t_marker}")
             t_marker +=1
