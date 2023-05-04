@@ -1,42 +1,14 @@
 import time
+from tkinter import W
 
 import numpy as np
 import taichi as ti
 import matplotlib.pyplot as plt
 
-"""
-Material Defs
-K [W/mK], Cp [J/kgK], rho [kg/m3]
-"""
-
-print(f"--- Material Library ---")
-mat_names = [
-    "outer",
-    "channel",
-    "concrete",
-    "xps"
-]
-mat_defs = np.array([
-    [3, 100, 100], 
-    [6, 100, 100],
-    [2.3, 1000, 2300], 
-    [0.039, 1450, 35],
-])
-mat_diffs = mat_defs[:,0]/(mat_defs[:,1]*mat_defs[:,2])
-mat_ids = {
-    name: i for i,name in enumerate(mat_names)
-}
-for name,mat_id in mat_ids.items():
-    print(f"\nMaterial: {name}")
-    print(f"k:   {mat_defs[mat_id, 0]:0.2f} [W/mK]")
-    print(f"Cp:  { int(mat_defs[mat_id, 1]):04d} [J/kgK]")
-    print(f"rho: { int(mat_defs[mat_id, 2]):04d} [kg/m3]")
-    print(f"D:   {  mat_diffs[mat_id]:0.3e} [m2/s]")
-
 
 @ti.data_oriented
 class Solver:
-    def __init__(self, dt, dx, n, D, boundary_values, colormap, u_min, u_range, updates_per_batch) -> None:
+    def __init__(self, dt, dx, n, D, mat_ids, mat_defs, mat_diffs, boundary_values, colormap, u_min, u_range, updates_per_batch) -> None:
 
         """Consts"""
         self.u_min = u_min
@@ -48,6 +20,14 @@ class Solver:
         self.c  = self.dt / (self.dx**2)
         self.updates_per_batch = updates_per_batch
         self.tol = 0.0001
+
+        """Material Dicts"""
+        self.mat_ids = mat_ids
+        self.mat_defs = mat_defs
+        self.mat_diffs = mat_diffs
+        self.mat_defs_field = ti.field(dtype=float, shape=mat_defs.shape)
+        self.mat_ids_field = ti.field(dtype=int, shape=(n,n))
+        self.mat_diffs_field = ti.field(dtype=int, shape=mat_diffs.shape)
 
         "Time Field"
         self.t = ti.field(dtype=float, shape=())
@@ -76,6 +56,7 @@ class Solver:
         """Rendering Fields"""
         self.colors   = ti.Vector.field(3, dtype=ti.f32, shape=(2*n, 2*n))
         self.colormap_field = ti.Vector.field(3, dtype=ti.f32, shape=len(colormap))
+        
 
 
 
@@ -83,10 +64,17 @@ class Solver:
         self.t[None] = 0
         self.init_boundary_values(boundary_values)
         self.populate_u0()
-        self.populate_D(D)
+        if type(self.mat_ids) is type(np.zeros(2)):
+            self.mat_defs_field.from_numpy(self.mat_defs.astype(np.float32))
+            self.mat_ids_field.from_numpy(self.mat_ids)
+            self.mat_diffs_field.from_numpy(self.mat_diffs.astype(np.float32))
+            self.populate_mat_properties()
+        else:
+            self.populate_D(D)
         self.precompute_coeffs()
         self.init_colormap(colormap)
         self.load_material_colors(D_max=D)
+        # self.load_material_colors(D_max=ti.max(self.D))
 
         self.fig = plt.figure()
         self.X, self.Y = np.meshgrid(np.arange(self.n), np.arange(self.n), indexing="xy")
@@ -95,9 +83,6 @@ class Solver:
         du = np.roll(d, 1,axis=1)
         d = np.logical_or(du != d, dr != d)
         self.edges = d*255
-
-
-
 
     def init_boundary_values(self, boundary_values):
         # NB: this does not init the cells, just the reference values!
@@ -126,45 +111,75 @@ class Solver:
             self.u_next[k] = self.u[k]
 
     @ti.kernel
+    def populate_mat_properties(self):
+        print("Populating material properties from mat map")
+        # TODO: self.mat_ids_field is a duplicate of self.mat
+        for col,row in self.D:
+            self.k[col, row]   = self.mat_defs_field[self.mat_ids_field[col, row], 0]
+            self.rho[col, row] = self.mat_defs_field[self.mat_ids_field[col, row], 1]
+            self.cp[col, row]  = self.mat_defs_field[self.mat_ids_field[col, row], 2]
+            self.D[col, row]   = self.k[col,row]/(self.rho[col,row]*self.cp[col,row])#self.mat_diffs_field[self.mat_ids_field[col, row]]
+            self.mat[col, row] = self.mat_ids_field[col, row]
+            if row == 50:
+                print(f"D: {self.D[col, row]}, k: {self.k[col, row]}, k: {self.rho[col, row]}, cp: {self.cp[col, row]}")
+
+            # TODO: move to shared fn
+            if col == 0 or row == 0 or col == self.n-1 or row == self.n-1:
+                boundary = 0.0
+                if col == 0 or col == self.n - 1:
+                    boundary = self.boundaries[0, int(col / (self.n-1))]
+                if row == 0 or row == self.n - 1:
+                    boundary = self.boundaries[1, int(row / (self.n-1))]
+                
+                if boundary < 0:
+                    """Adiabatic"""
+                    self.mat[col, row] = ti.cast(-1, ti.i8)
+
+                    self.k[col, row] = 0.000001
+                    self.cp[col, row] = 1.0
+                    self.rho[col, row] = 1.0
+                    self.D[col, row] = 0.0
+
+    @ti.kernel
     def populate_D(self, D: float):
         self.D.fill(D)
 
         for col, row in self.D:
             if row < 3/8 * self.n:
-                self.mat[col, row] = ti.cast(mat_ids['outer'], ti.i8)
+                self.mat[col, row] = ti.cast(self.mat_ids['outer'], ti.i8)
 
-                self.k[col, row] = mat_defs[mat_ids['outer'], 0]
-                self.cp[col, row] = mat_defs[mat_ids['outer'], 1]
-                self.rho[col, row] = mat_defs[mat_ids['outer'], 2]
-                self.D[col, row] = mat_diffs[mat_ids['outer']]
+                self.k[col, row] = self.mat_defs[self.mat_ids['outer'], 0]
+                self.cp[col, row] = self.mat_defs[self.mat_ids['outer'], 1]
+                self.rho[col, row] = self.mat_defs[self.mat_ids['outer'], 2]
+                self.D[col, row] = self.mat_diffs[self.mat_ids['outer']]
             elif row < 4/8 * self.n:
-                self.mat[col, row] = ti.cast(mat_ids['xps'], ti.i8)
+                self.mat[col, row] = ti.cast(self.mat_ids['xps'], ti.i8)
 
-                self.k[col, row] = mat_defs[mat_ids['xps'], 0]
-                self.cp[col, row] = mat_defs[mat_ids['xps'], 1]
-                self.rho[col, row] = mat_defs[mat_ids['xps'], 2]
-                self.D[col, row] = mat_diffs[mat_ids['xps']]
+                self.k[col, row] = self.mat_defs[self.mat_ids['xps'], 0]
+                self.cp[col, row] = self.mat_defs[self.mat_ids['xps'], 1]
+                self.rho[col, row] = self.mat_defs[self.mat_ids['xps'], 2]
+                self.D[col, row] = self.mat_diffs[self.mat_ids['xps']]
             elif row < 5/8 * self.n:
-                self.mat[col, row] = ti.cast(mat_ids['concrete'], ti.i8)
+                self.mat[col, row] = ti.cast(self.mat_ids['concrete'], ti.i8)
 
-                self.k[col, row] = mat_defs[mat_ids['concrete'], 0]
-                self.cp[col, row] = mat_defs[mat_ids['concrete'], 1]
-                self.rho[col, row] = mat_defs[mat_ids['concrete'], 2]
-                self.D[col, row] = mat_diffs[mat_ids['concrete']]
+                self.k[col, row] = self.mat_defs[self.mat_ids['concrete'], 0]
+                self.cp[col, row] = self.mat_defs[self.mat_ids['concrete'], 1]
+                self.rho[col, row] = self.mat_defs[self.mat_ids['concrete'], 2]
+                self.D[col, row] = self.mat_diffs[self.mat_ids['concrete']]
             else:
-                self.mat[col, row] = ti.cast(mat_ids['outer'], ti.i8)
+                self.mat[col, row] = ti.cast(self.mat_ids['outer'], ti.i8)
 
-                self.k[col, row] = mat_defs[mat_ids['outer'], 0]
-                self.cp[col, row] = mat_defs[mat_ids['outer'], 1]
-                self.rho[col, row] = mat_defs[mat_ids['outer'], 2]
-                self.D[col, row] = mat_diffs[mat_ids['outer']]
+                self.k[col, row] = self.mat_defs[mat_ids['outer'], 0]
+                self.cp[col, row] = self.mat_defs[self.mat_ids['outer'], 1]
+                self.rho[col, row] = self.mat_defs[self.mat_ids['outer'], 2]
+                self.D[col, row] = self.mat_diffs[self.mat_ids['outer']]
             if (row >= 3/8*self.n and row <= 5/8*self.n) and ((col > 6/21*self.n and col < 7/21*self.n) or (col > 10/21*self.n and col < 11/21*self.n) or (col > 14/21*self.n and col < 15/21*self.n)):
-                self.mat[col, row] = ti.cast(mat_ids['channel'], ti.i8)
+                self.mat[col, row] = ti.cast(self.mat_ids['channel'], ti.i8)
 
-                self.k[col, row] = mat_defs[mat_ids['channel'], 0]
-                self.cp[col, row] = mat_defs[mat_ids['channel'], 1]
-                self.rho[col, row] = mat_defs[mat_ids['channel'], 2]
-                self.D[col, row] = mat_diffs[mat_ids['channel']]
+                self.k[col, row] = self.mat_defs[self.mat_ids['channel'], 0]
+                self.cp[col, row] = self.mat_defs[self.mat_ids['channel'], 1]
+                self.rho[col, row] = self.mat_defs[self.mat_ids['channel'], 2]
+                self.D[col, row] = self.mat_diffs[self.mat_ids['channel']]
 
             if col == 0 or row == 0 or col == self.n-1 or row == self.n-1:
                 boundary = 0.0
@@ -189,6 +204,8 @@ class Solver:
         self.k_sum.fill(0)
         for col, row in self.cv:
             self.cv[col, row] = self.rho[col, row]*self.cp[col, row]
+            # TODO: should self.dx be mul'd in here?
+            # self.c_cvinv[col, row] = self.dx*self.c/self.cv[col, row]
             self.c_cvinv[col, row] = self.c/self.cv[col, row]
             # TODO: migrate to multi-dim final slot for col/row
             k = self.k[col, row]
@@ -398,6 +415,36 @@ class Solver:
 
 
 if __name__ == '__main__':
+
+    """
+    Material Defs
+    K [W/mK], Cp [J/kgK], rho [kg/m3]
+    """
+
+    print(f"--- Material Library ---")
+    mat_names = [
+        "outer",
+        "channel",
+        "concrete",
+        "xps"
+    ]
+    mat_defs = np.array([
+        [3, 100, 100], 
+        [6, 100, 100],
+        [2.3, 1000, 2300], 
+        [0.039, 1450, 35],
+    ])
+    mat_diffs = mat_defs[:,0]/(mat_defs[:,1]*mat_defs[:,2])
+    mat_ids = {
+        name: i for i,name in enumerate(mat_names)
+    }
+    for name,mat_id in mat_ids.items():
+        print(f"\nMaterial: {name}")
+        print(f"k:   {mat_defs[mat_id, 0]:0.2f} [W/mK]")
+        print(f"Cp:  { int(mat_defs[mat_id, 1]):04d} [J/kgK]")
+        print(f"rho: { int(mat_defs[mat_id, 2]):04d} [kg/m3]")
+        print(f"D:   {  mat_diffs[mat_id]:0.3e} [m2/s]")
+
     ti.init(arch=ti.cuda, default_fp=ti.f32)
     D = np.max(mat_diffs) # [m2/s]
     dx = 0.01 # [m]
@@ -428,14 +475,14 @@ if __name__ == '__main__':
     colormap = jet(np.arange(jet.N))*255
 
 
-    solver = Solver(dt, dx, n, D, boundary_values, colormap, u_min, u_range, updates_per_batch=100)
+    solver = Solver(dt, dx, n, D, mat_ids, mat_defs, mat_diffs, boundary_values, colormap, u_min, u_range, updates_per_batch=100)
     # solver.check_explicit_cfl()
     # solver.benchmark_explicit(n_tests=100)
 
     """
     Render setup
     """
-    window_scale_factor = 1.5
+    window_scale_factor = 0.75
     window = ti.ui.Window("2D Diffusion", (int(window_scale_factor*2*n),int(window_scale_factor*2*n)))
     canvas = window.get_canvas()
 
