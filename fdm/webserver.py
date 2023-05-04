@@ -8,6 +8,9 @@ from diffusion_eq_2d_exp import Solver
 
 app = Flask(__name__)
 
+# TODO: add dx, dt to config
+# TODO: add boundary config
+# TODO: add uinit config options
 @app.route('/', methods=["GET","POST"])
 def index():
     """Extract sim config"""
