@@ -120,8 +120,6 @@ class Solver:
             self.cp[col, row]  = self.mat_defs_field[self.mat_ids_field[col, row], 2]
             self.D[col, row]   = self.k[col,row]/(self.rho[col,row]*self.cp[col,row])#self.mat_diffs_field[self.mat_ids_field[col, row]]
             self.mat[col, row] = self.mat_ids_field[col, row]
-            if row == 50:
-                print(f"D: {self.D[col, row]}, k: {self.k[col, row]}, k: {self.rho[col, row]}, cp: {self.cp[col, row]}")
 
             # TODO: move to shared fn
             if col == 0 or row == 0 or col == self.n-1 or row == self.n-1:
