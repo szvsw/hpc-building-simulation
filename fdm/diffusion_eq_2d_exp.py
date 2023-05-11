@@ -10,6 +10,8 @@ class Solver:
     def __init__(self, dt, dx, n, D, mat_ids, mat_defs, mat_diffs, boundary_values, colormap, u_min, u_range, updates_per_batch) -> None:
 
         """Consts"""
+        self.mesh_render_size = 5
+        self.mesh_height = 1.5
         self.u_min = u_min
         self.u_range = u_range
         self.n  = n
@@ -43,6 +45,7 @@ class Solver:
         self.denom   = ti.field(dtype=float, shape=(n,n))   # self.rho * self.cp
         self.D       = ti.field(dtype=float, shape=(n,n))   # self.k / self.cv
 
+
         """BC Fields"""
         self.boundaries = ti.field(dtype=float, shape=(2,2))
 
@@ -55,6 +58,11 @@ class Solver:
         """Rendering Fields"""
         self.colors   = ti.Vector.field(3, dtype=ti.f32, shape=(2*n, 2*n))
         self.colormap_field = ti.Vector.field(3, dtype=ti.f32, shape=len(colormap))
+
+        """"Mesh Fields"""
+        self.vertices = ti.Vector.field(3,dtype=ti.float32, shape=(self.n**2))
+        self.indices = ti.field(dtype=int, shape=(3*2*(self.n-1)**2))
+        self.mesh_colors = ti.Vector.field(3,dtype=ti.float32, shape=(self.n**2))           
         
 
 
@@ -105,6 +113,26 @@ class Solver:
             self.u[k] = self.u_min + ti.random()*self.u_range
             self.u[k] = self.u_min 
             # self.u[k] = self.u_min + self.u_range/2 + ti.abs(0.5 - k.x/self.n)*self.u_range - ti.abs(0.5 - k.y/self.n)*self.u_range
+
+            """Gaussian"""
+            x = k.x / (self.n-1) - 0.5
+            y = k.y / (self.n-1) - 0.15
+            d2 = x**2 + y**2
+            sigma = 0.05
+            A = 2
+            self.u[k] = A*1/(sigma*ti.sqrt(2*np.pi)) * ti.exp(-(d2) / (2*sigma**2))*self.u_range + self.u_min
+
+            """Sine Field"""
+            wn_x = 4
+            wn_y = 2
+            x = (k.x / (self.n-1))*2*np.pi * wn_x
+            y = (k.y / (self.n-1))*2*np.pi * wn_y
+            self.u[k] = (0.5*ti.sin(x)+0.5)*self.u_range/2  + (0.5*ti.cos(y)+0.5)*self.u_range/2 + self.u_min
+            
+            """Min"""
+            self.u[k] = self.u_min 
+
+
 
             """Prepare for Jacobi/Gauss-Seidel"""
             self.u_next[k] = self.u[k]
@@ -197,6 +225,10 @@ class Solver:
 
     @ti.kernel
     def precompute_coeffs(self):
+        # for col, row in self.cv:
+        #     # self.cv[col,row] *= self.dx
+        #     self.k[col, row] /= self.dx
+        #     self.D[col, row] /= self.dx
         self.k_mid.fill(-1) # -1 on boundaries for now
         self.k_sum.fill(0)
         for col, row in self.cv:
@@ -395,24 +427,79 @@ class Solver:
             self.colors[i,j+self.n].z = ti.cast((self.colormap_field[level_idx].z * (1-colorphase) + colorphase*self.colormap_field[level_idx+1].z)/255, ti.float32)
     
     def plot_isotherms(self):
-            plt.cla()
-            u = self.u.to_numpy()
-            u_col = self.colors.to_numpy()[:self.n,:self.n]
-            plt.imshow(np.clip(np.swapaxes(u_col, 0,1), 0, 1.0))
-            plt.contour(self.X, self.Y, np.swapaxes(u,0,1), colors='black', levels=np.arange(273.15 -5,273.15+21,0.2), linewidths=(1, 0.25, 0.25, 0.25, 0.25))#, linewidths=(0.25, 0.25, 0.25, 1)), linewidths=(0.25, 0.25, 0.25, 0.25, 1))
+        plt.cla()
+        u = self.u.to_numpy()
+        u_col = self.colors.to_numpy()[:self.n,:self.n]
+        plt.imshow(np.clip(np.swapaxes(u_col, 0,1), 0, 1.0))
+        plt.contour(self.X, self.Y, np.swapaxes(u,0,1), colors='black', levels=np.arange(273.15 -5,273.15+21,0.2), linewidths=(1, 0.25, 0.25, 0.25, 0.25))#, linewidths=(0.25, 0.25, 0.25, 1)), linewidths=(0.25, 0.25, 0.25, 0.25, 1))
 
-            ax = plt.gca()
-            ax.invert_yaxis()
-            plt.axis("off")
-            plt.draw()
-            plt.pause(0.01)
+        ax = plt.gca()
+        ax.invert_yaxis()
+        plt.axis("off")
+        plt.draw()
+        plt.pause(0.01)
 
+    @ti.kernel
+    def init_mesh_vertices(self):
+        for i,j in ti.ndrange(self.n,self.n):
+            self.vertices[i+self.n*j].x = ti.cast(i/(self.n-1)*self.mesh_render_size-self.mesh_render_size/2, ti.float32)
+            self.vertices[i+self.n*j].y = ti.cast(0.0, ti.float32)
+            self.vertices[i+self.n*j].z = ti.cast(j/(self.n-1)*self.mesh_render_size-self.mesh_render_size/2, ti.float32)
 
+    @ti.kernel
+    def init_mesh_indices(self):
+        for i, j in ti.ndrange(self.n- 1, self.n- 1):
+                quad_id = (i * (self.n- 1)) + j
+                # First triangle of the square
+                self.indices[quad_id * 6 + 0] = i * self.n+ j
+                self.indices[quad_id * 6 + 1] = (i + 1) * self.n+ j
+                self.indices[quad_id * 6 + 2] = i * self.n+ (j + 1)
+                # Second triangle of the square
+                self.indices[quad_id * 6 + 3] = (i + 1) * self.n+ j + 1
+                self.indices[quad_id * 6 + 4] = i * self.n+ (j + 1)
+                self.indices[quad_id * 6 + 5] = (i + 1) * self.n+ j
 
+    @ti.kernel
+    def update_mesh_vertices(self):
+        for i,j in self.u:
 
+            h = ti.cast(self.u[i,j] - self.u_min, ti.float32)/self.u_range
+            # TODO: more elegant boundary checks, and set adaibatic temp elsewhere?
+            if i == 0 or j == 0 or i == self.n-1 or j == self.n-1: # i is col, j is row
+                if i == 0 or i == self.n - 1:
+                    boundary = self.boundaries[0, int(i / (self.n-1))]
+                    if boundary < 0: # TODO: create a separate flag
+                        """Adiabatic"""
+                        if i == 0:
+                            h = self.u[i+1,j]
+                        else:
+                            h = self.u[i-1,j]
+                        h = ti.cast(h - self.u_min, ti.float32)/self.u_range
+                else:
+                    boundary = self.boundaries[1, int(j / (self.n-1))]
+                    if boundary < 0: # TODO: create a separate flag
+                        """Adiabatic"""
+                        if j == 0:
+                            h = self.u[i,j+1]
+                        else:
+                            h = self.u[i,j-1]
+                        h = ti.cast(h - self.u_min, ti.float32)/self.u_range
+
+            self.vertices[i+self.n*j].y = h*self.mesh_height
+            
+            level = ti.max(ti.min(ti.floor(h*(self.colormap_field.shape[0]-1)),self.colormap_field.shape[0]-2), 0)
+            colorphase = ti.cast(ti.min(ti.max(h*(self.colormap_field.shape[0]-1) - level, 0),1), ti.f32)
+            level_idx = ti.cast(level, dtype=int)
+
+            self.mesh_colors[i+self.n*j].x = ti.cast((self.colormap_field[level_idx].x * (1-colorphase) + colorphase*self.colormap_field[level_idx+1].x)/255, ti.float32)
+            self.mesh_colors[i+self.n*j].y = ti.cast((self.colormap_field[level_idx].y * (1-colorphase) + colorphase*self.colormap_field[level_idx+1].y)/255, ti.float32)
+            self.mesh_colors[i+self.n*j].z = ti.cast((self.colormap_field[level_idx].z * (1-colorphase) + colorphase*self.colormap_field[level_idx+1].z)/255, ti.float32)
 
 if __name__ == '__main__':
 
+    USE_MESH=False
+    USE_MATS=True
+    PLOT_ISO=True
     """
     Material Defs
     K [W/mK], Cp [J/kgK], rho [kg/m3]
@@ -425,12 +512,20 @@ if __name__ == '__main__':
         "concrete",
         "xps"
     ]
-    mat_defs = np.array([
-        [3, 100, 100], 
-        [6, 100, 100],
-        [2.3, 1000, 2300], 
-        [0.039, 1450, 35],
-    ])
+    if USE_MATS:
+        mat_defs = np.array([
+            [3, 100, 100], 
+            [6, 100, 100],
+            [2.3, 1000, 2300], 
+            [0.039, 1450, 35],
+        ])
+    else:
+        mat_defs = np.array([
+            [0.1, 100, 1000], 
+            [0.1, 100, 1000],
+            [0.1, 100, 1000], 
+            [0.1, 100, 1000], 
+        ])
     mat_diffs = mat_defs[:,0]/(mat_defs[:,1]*mat_defs[:,2])
     mat_ids = {
         name: i for i,name in enumerate(mat_names)
@@ -456,6 +551,7 @@ if __name__ == '__main__':
 
     boundary_values = [
         # [-1, -1],
+        # [-1, -1]
         [1, 1],
         [1, 0]
     ]
@@ -479,21 +575,49 @@ if __name__ == '__main__':
     """
     Render setup
     """
-    window_scale_factor = 0.75
+    window_scale_factor = 2
     window = ti.ui.Window("2D Diffusion", (int(window_scale_factor*2*n),int(window_scale_factor*2*n)))
     canvas = window.get_canvas()
+    scene = ti.ui.Scene()
+    camera = ti.ui.Camera()
+    # camera.position(8, 4, 0)
+    # camera.up(1,0,0)
+    camera.position(0, 8, 0)
+    camera.lookat(0,0,0)
+    camera.up(0,1,0)
+    camera_radius = 6
+    camera_height = 6
+    camera_speed = 0.02
+    camera_t = 0
+    if USE_MESH:
+        solver.init_mesh_vertices()
+        solver.init_mesh_indices()
+        solver.update_mesh_vertices()
 
     it = 0
     t_marker = 1
     
     while window.running:
 
-        solver.update_colors()
-        canvas.set_image(solver.colors)
+        if USE_MESH:
+            camera_t += camera_speed
+            camera.position(camera_radius*ti.sin(camera_t), camera_height, camera_radius*ti.cos(camera_t))
+            # camera.track_user_inputs(window, movement_speed=0.2, hold_key=ti.ui.RMB)
+            scene.set_camera(camera)
+            scene.ambient_light((0.8, 0.8, 0.8))
+            scene.point_light(pos=(0.0, 4.5, 0.0), color=(0.2, 0.2, 0.2))
+
+            solver.update_mesh_vertices()
+            scene.mesh(solver.vertices, solver.indices, per_vertex_color=solver.mesh_colors)
+            canvas.scene(scene)
+        else:
+            solver.update_colors()
+            canvas.set_image(solver.colors)
 
         solver.explicit_batch()
         # window.save_image(f"./week_5_fd_pde/images_4/{it:05d}.png")
-        if it%200 == 0:
+        
+        if it*solver.updates_per_batch*solver.dt % (3600) == 0 and PLOT_ISO==True:
             solver.plot_isotherms()
         if it*solver.updates_per_batch*solver.dt/(3600*24) > t_marker:
             print(f"Completed day {t_marker}")
