@@ -110,11 +110,16 @@ colormap = jet(np.arange(jet.N))*255
 if __name__ == "__main__":
 
     model_path =  "2d-simple-neumann2d-5-heated-with-wind-adaptive.pth"
-    USE_MESH = False
+    model_path =  "new-bc-method.pth"
+    USE_MESH = True
+    PLOT_Q = False
     dt = 0.01
     t_bounds = [0, 8*np.pi]
     s_bounds = [-4*np.pi, 4*np.pi]
-    u_min, u_range = 0.0, 2.5
+    t_min, t_range = 0.0, 1
+    q_min, q_range = 0.0, 0.1
+    u_min, u_range = q_min if PLOT_Q else t_min, q_range if PLOT_Q else t_range
+
     mesh_height = 2.0
 
     """Computed"""
@@ -144,7 +149,7 @@ if __name__ == "__main__":
     update_mesh_vertices(u_chi, mesh_colors, vertices, colormap_field, -2, 2, 3.0)
 
     """Torch"""
-    pts = pts_chi.to_torch().to(device)
+    pts = pts_chi.to_torch().to(device).requires_grad_(True)
     pts = pts.reshape(-1,2)
     t = torch.zeros((pts.shape[0],1), device=device)
     pts = torch.hstack([t,pts])
@@ -165,26 +170,44 @@ if __name__ == "__main__":
     camera_t = 0
 
 
+    it = 0
     while window.running:
-        with torch.no_grad():
-            for i in range(t_steps.shape[0]):
-                pts[:,0] = t_steps[i]
-                u = net(pts)
-                u = u.reshape(RES,RES)
-                u_chi.from_torch(u)
+        pts[:,0] = t_steps[it]
+        u = net(pts)
+        if PLOT_Q:
+            grad = torch.autograd.grad(
+                inputs=pts,
+                outputs=u,
+                grad_outputs=torch.ones_like(u),
+                create_graph=False,
+                retain_graph=False
+            )[0]
+            q = grad[:,1:]
+            q = torch.sqrt(torch.sum(q**2, axis=1)).reshape(RES,RES)
+            u_chi.from_torch(q)
+        else:
+            u = u.reshape(RES,RES)
+            u_chi.from_torch(u)
 
-                if USE_MESH:
-                    camera_t += camera_speed
-                    camera.position(camera_radius*ti.sin(camera_t), camera_height, camera_radius*ti.cos(camera_t))
-                    scene.set_camera(camera)
-                    scene.ambient_light((0.8, 0.8, 0.8))
-                    scene.point_light(pos=(0.0, 4.5, 0.0), color=(0.2, 0.2, 0.2))
+        if it % 100 == 0:
+            print("")
+            print(f"min u:{torch.min(u).item()}, max u:{torch.max(u).item()}, SUM:{torch.sum(u).item()}")
+            if PLOT_Q:
+                print(f"min q:{torch.min(q).item()}, max u:{torch.max(q).item()}, SUM:{torch.sum(q).item()}")
 
-                    update_mesh_vertices(u_chi, mesh_colors, vertices, colormap_field, u_min, u_range, mesh_height)
-                    scene.mesh(vertices, indices, per_vertex_color=mesh_colors)
-                    canvas.scene(scene)
-                else:
-                    update_colors(u_chi, colors, colormap_field, u_min, u_range)
-                    canvas.set_image(colors)
+        if USE_MESH:
+            camera_t += camera_speed
+            camera.position(camera_radius*ti.sin(camera_t), camera_height, camera_radius*ti.cos(camera_t))
+            scene.set_camera(camera)
+            scene.ambient_light((0.8, 0.8, 0.8))
+            scene.point_light(pos=(0.0, 4.5, 0.0), color=(0.2, 0.2, 0.2))
 
-                window.show()
+            update_mesh_vertices(u_chi, mesh_colors, vertices, colormap_field, u_min, u_range, mesh_height)
+            scene.mesh(vertices, indices, per_vertex_color=mesh_colors)
+            canvas.scene(scene)
+        else:
+            update_colors(u_chi, colors, colormap_field, u_min, u_range)
+            canvas.set_image(colors)
+
+        window.show()
+        it = (it + 1) % t_steps.shape[0]

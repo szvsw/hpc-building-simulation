@@ -1,3 +1,6 @@
+import os
+from pathlib import Path
+from typing import List, Union
 import numpy as np
 import torch
 import torch.nn as nn
@@ -5,10 +8,12 @@ import torch.nn.functional as F
 
 import matplotlib.pyplot as plt
 
-from tqdm.notebook import tqdm
+from tqdm import tqdm
 import plotly.io as pio
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+
+from mlp import MLP
 
 device = 'cuda' if torch.cuda.is_available() else 'device'
 print(f"Using {device}")
@@ -39,13 +44,6 @@ class PINN_1D:
         
         self.loss_fn = nn.MSELoss()
         self.adam = torch.optim.Adam(self.net.parameters(), lr=lr)
-        self.lbfgs = torch.optim.LBFGS(
-            self.net.parameters(),
-            history_size=50,
-            tolerance_grad=1e-7, 
-            tolerance_change=1.0 * np.finfo(float).eps,
-            line_search_fn="strong_wolfe",   # better numerical stability
-        )
 
         self.runs = []
         self.loss_history = []
@@ -167,7 +165,6 @@ class PINN_1D:
 
         """Reset grads"""
         self.adam.zero_grad()
-        self.lbfgs.zero_grad()
 
         """Initial Conditions"""
         u_ic_pred = self.net(pts_ic)
@@ -196,7 +193,7 @@ class PINN_1D:
         loss.backward()
         return loss
     
-    def train(self, n_epochs=500, mode='Adam', reporting_frequency=500, phys_weight=None, res_weight=None, bc_weight=None, ic_weight=None):
+    def train(self, n_epochs=500, reporting_frequency=500, phys_weight=None, res_weight=None, bc_weight=None, ic_weight=None):
         if phys_weight is not None:
           self.phys_weight = phys_weight
         if  res_weight is not None:
@@ -209,7 +206,7 @@ class PINN_1D:
             "loss": []
         }
         for it in tqdm(range(n_epochs)):
-            loss = self.adam.step(self.train_step) if mode == "Adam" else self.lbfgs.step(self.train_step)
+            loss = self.adam.step(self.train_step) 
             results["loss"].append(loss.item())
             self.loss_history.append(loss.item())
             if it % reporting_frequency == 0:
@@ -314,95 +311,83 @@ class PINN_1D:
 class PINN_2D:
     def __init__(
       self, 
-      net, 
+      net: MLP, 
+      ics,
+      bcs,
       lr=1e-4, 
       collocation_ct=500, 
-      boundary_ct=100, 
-      initial_ct=100, 
       t_bounds=[0,4], 
       space_bounds=[-2*np.pi,2*np.pi],
-      boundary_type=["dirchelet", "dirchelet", "dirchelet", "dirchelet"],
-      ic_fn=lambda pts: torch.sin(pts[:,1:2]),
-      bc_fn=lambda pts: pts[:,0:1]*0,
       d_fn=lambda pts: pts[:,1:2]*0 + 5,
       adaptive_resample=False
     ) -> None:
         self.net = net.to(device)
         self.t_bounds = t_bounds
+        self.t_min = self.t_bounds[0]
+        self.t_max = self.t_bounds[1]
+        self.t_range = self.t_max - self.t_min
+
         self.space_bounds = space_bounds
+        self.x_min = self.space_bounds[0]
+        self.x_max = self.space_bounds[1]
+        self.x_range = self.x_max - self.x_min
+
+        self.y_min = self.space_bounds[0]
+        self.y_max = self.space_bounds[1]
+        self.y_range = self.y_max - self.y_min
+
         self.collocation_ct = collocation_ct
-        self.boundary_ct = boundary_ct
-        self.initial_ct = initial_ct
         self.dim = 1 + 2
         
         self.loss_fn = nn.MSELoss()
         self.adam = torch.optim.Adam(self.net.parameters(), lr=lr)
-        self.lbfgs = torch.optim.LBFGS(
-            self.net.parameters(),
-            history_size=50,
-            tolerance_grad=1e-7, 
-            tolerance_change=1.0 * np.finfo(float).eps,
-            line_search_fn="strong_wolfe",   # better numerical stability
-        )
 
-        self.runs = []
         self.loss_history = []
-        self.boundary_type = boundary_type
 
         self.ic_weight=1,
         self.bc_weight=1
         self.phys_weight = 0.1
         self.res_weight = 0.05
 
-        self.ic_fn = ic_fn
-        self.bc_fn = bc_fn
         self.d_fn = d_fn
 
         self.adaptive_resample =  adaptive_resample
-
-    def sample_ics(self):
-        # torch.manual_seed(0)
-
-        int_pts = torch.rand((self.initial_ct, self.dim), device=device, requires_grad=False) * (self.space_bounds[1]-self.space_bounds[0]) + self.space_bounds[0]
-        edge_pts = (torch.sign(2*torch.rand((self.boundary_ct, self.dim), device=device, requires_grad=False)-1)+1)/2 * (self.space_bounds[1]-self.space_bounds[0]) + self.space_bounds[0]
-        pts = torch.vstack([int_pts, edge_pts])
-        pts[:,0] = 0 # time at start
-
-        # Gaussian start
-        u = self.ic_fn(pts)
-
-        return pts, u
+        self.BCs: List[BC] = bcs
+        self.ICs: List[BC] = ics
+        for bc in bcs+ics:
+          bc.parent = self
     
+    def sample_ics(self):
+      for ic in self.ICs:
+        ic.sample(cache=True)
+
     def sample_bcs(self):
-        # torch.manual_seed(1)
-        quarter = int(self.boundary_ct/4)
-        pts_l = torch.ones((quarter, self.dim), device=device, requires_grad=False if self.boundary_type[0] != "neumann" else True ) * self.space_bounds[0]
-        pts_r = torch.ones((quarter, self.dim), device=device, requires_grad=False if self.boundary_type[1] != "neumann" else True ) * self.space_bounds[1]
-        pts_d = torch.ones((quarter, self.dim), device=device, requires_grad=False if self.boundary_type[1] != "neumann" else True ) * self.space_bounds[0]
-        pts_u = torch.ones((quarter, self.dim), device=device, requires_grad=False if self.boundary_type[1] != "neumann" else True ) * self.space_bounds[1]
-        pts_l[:,2] = torch.rand((quarter), device=device) * (self.space_bounds[1] - self.space_bounds[0]) + self.space_bounds[0] # randomize y
-        pts_r[:,2] = torch.rand((quarter), device=device) * (self.space_bounds[1] - self.space_bounds[0]) + self.space_bounds[0] # randomize y
-        pts_d[:,1] = torch.rand((quarter), device=device) * (self.space_bounds[1] - self.space_bounds[0]) + self.space_bounds[0] # randomize x
-        pts_u[:,1] = torch.rand((quarter), device=device) * (self.space_bounds[1] - self.space_bounds[0]) + self.space_bounds[0] # randomize x
+      for bc in self.BCs:
+        bc.sample(cache=True)
+    
+    def loss_ic(self):
+      preds = []
+      truths = []
+      for ic in self.ICs:
+        pred = ic.predict(cache=True)
+        preds.append(pred)
+        truths.append(ic.truth)
+        
+      pred = torch.vstack(preds)
+      truth = torch.vstack(truths)
+      return self.loss_fn(pred,truth)
 
-        t = torch.rand(quarter, device=device, requires_grad=False) * (self.t_bounds[1] - self.t_bounds[0]) + self.t_bounds[0]
-        pts_l[:,0] = t
-        pts_r[:,0] = t
-        pts_d[:,0] = t
-        pts_u[:,0] = t
-
-        edge_list = [pts_l, pts_r, pts_d, pts_u]
-        periodic_pts = [pts for i,pts in enumerate(edge_list) if self.boundary_type[i] == "periodic"]
-        dirchelet_pts = [pts for i,pts in enumerate(edge_list) if self.boundary_type[i] == "dirchelet"]
-        neumann_pts = [pts for i,pts in enumerate(edge_list) if self.boundary_type[i] == "neumann"]
-
-        periodic_vals = [pts_r if i == 0 else pts_l for i,pts in enumerate(edge_list) if self.boundary_type[i] == "periodic"]
-        dirchelet_vals = [self.bc_fn(pts) for i,pts in enumerate(edge_list) if self.boundary_type[i] == "dirchelet"]
-        neumann_vals = [self.bc_fn(pts) for i,pts in enumerate(edge_list) if self.boundary_type[i] == "neumann"]
-        bc_true = torch.vstack(periodic_vals+dirchelet_vals+neumann_vals)
-        pts = torch.vstack(periodic_pts+dirchelet_pts+neumann_pts)
-
-        return pts, bc_true, periodic_pts, dirchelet_pts, neumann_pts, edge_list
+    def loss_bc(self):
+      preds = []
+      truths = []
+      for bc in self.BCs:
+        bc_pred = bc.predict(cache=True)
+        preds.append(bc_pred)
+        truths.append(bc.truth)
+        
+      pred = torch.vstack(preds)
+      truth = torch.vstack(truths)
+      return self.loss_fn(pred,truth)
     
     def sample_collocation(self, adaptive_sample=False):
         # torch.manual_seed(2)
@@ -410,10 +395,11 @@ class PINN_2D:
           initial_ct = self.collocation_ct*10
           pts_rand = torch.rand((initial_ct, self.dim), device=device, requires_grad=True)
           pts = torch.empty_like(pts_rand)
-          pts[:,0] = pts_rand[:,0] * (self.t_bounds[1]- self.t_bounds[0]) + self.t_bounds[0] 
-          pts[:,1] = pts_rand[:,1] * (self.space_bounds[1]- self.space_bounds[0]) + self.space_bounds[0] 
-          pts[:,2] = pts_rand[:,2] * (self.space_bounds[1]- self.space_bounds[0]) + self.space_bounds[0] 
-          _u, _r, r2, _q, _qx, _qy = self.governing_eq(pts)
+          pts[:,0] = pts_rand[:,0] * self.t_range + self.t_min
+          pts[:,1] = pts_rand[:,1] * self.x_range + self.x_min
+          pts[:,2] = pts_rand[:,2] * self.y_range + self.y_min
+          results = self.governing_eq(pts)
+          r2 = results["r2"]
           e_r2 = torch.mean(r2)
           p_X = (r2 / e_r2) / torch.sum(r2 / e_r2)
           pts_subsample_ix = torch.multinomial(p_X.flatten(), self.collocation_ct, replacement=True)
@@ -423,139 +409,131 @@ class PINN_2D:
         else:
           pts_rand = torch.rand((self.collocation_ct, self.dim), device=device, requires_grad=True)
           pts = torch.empty_like(pts_rand)
-          pts[:,0] = pts_rand[:,0] * (self.t_bounds[1]- self.t_bounds[0]) + self.t_bounds[0] 
-          pts[:,1] = pts_rand[:,1] * (self.space_bounds[1]- self.space_bounds[0]) + self.space_bounds[0] 
-          pts[:,2] = pts_rand[:,2] * (self.space_bounds[1]- self.space_bounds[0]) + self.space_bounds[0] 
+          pts[:,0] = pts_rand[:,0] * self.t_range + self.t_min
+          pts[:,1] = pts_rand[:,1] * self.x_range + self.x_min
+          pts[:,2] = pts_rand[:,2] * self.y_range + self.y_min
           return pts
 
-    def governing_eq(self, pts):
+    def heat_flux(self, pts):
         """Predict"""
-        u = self.net(pts)
+        D = self.d_fn(pts)
+        T = self.net(pts)
 
         """Partials"""
         grad = torch.autograd.grad(
             inputs=pts,
-            outputs=u,
-            grad_outputs=torch.ones_like(u).to(device),
+            outputs=T,
+            grad_outputs=torch.ones_like(T).to(device),
             create_graph=True,
             retain_graph=True
         )[0]
 
-        u_t = grad[:,0:1]
-        u_x = grad[:,1:2]
-        u_y = grad[:,2:3]
+        T_x = grad[:,1:2]
+        T_y = grad[:,2:3]
+        q_x = -D * T_x
+        q_y = -D * T_y
+        return {"T": T, "T_x": T_x, "T_y": T_y, "q_x": q_x, "q_y": q_y, "D": D}
+      
+    def governing_eq(self, pts):
+        """Predict"""
+        T = self.net(pts)
+        D = self.d_fn(pts)
+
+        """Partials"""
+        grad = torch.autograd.grad(
+            inputs=pts,
+            outputs=T,
+            grad_outputs=torch.ones_like(T).to(device),
+            create_graph=True,
+            retain_graph=True
+        )[0]
+
+        T_t = grad[:,0:1]
+        T_x = grad[:,1:2]
+        T_y = grad[:,2:3]
+        q_x = D*T_x
+        q_y = D*T_y
 
         """Diffusion"""
-        u_x_grad = torch.autograd.grad(
+        DT_xx = torch.autograd.grad(
             inputs=pts,
-            outputs=u_x,
-            grad_outputs=torch.ones_like(u_x).to(device),
+            outputs=q_x,
+            grad_outputs=torch.ones_like(q_x).to(device),
             create_graph=True,
             retain_graph=True
-        )[0]
+        )[0][:,1:2]
 
-        u_y_grad = torch.autograd.grad(
+        DT_yy = torch.autograd.grad(
             inputs=pts,
-            outputs=u_y,
-            grad_outputs=torch.ones_like(u_y).to(device),
+            outputs=q_y,
+            grad_outputs=torch.ones_like(q_y).to(device),
             create_graph=True,
             retain_graph=True
-        )[0]
+        )[0][:,2:3]
 
-        u_xx = u_x_grad[:,1:2]
-        u_yy = u_y_grad[:,2:3]
+        diffusion = DT_xx + DT_yy
 
         """Advection"""
-        v = torch.ones_like(torch.hstack([u,u]))*1.5
+        v = torch.ones_like(torch.hstack([T,T]))*1.5
         v[:,0] = 0
-        vu = v*u
-        vux = vu[:,0:1]
-        vuy = vu[:,1:2]
+        vT = v*T
+        vxT = vT[:,0:1]
+        vyT = vT[:,1:2]
 
-        vu_grad_x = torch.autograd.grad(
+        vT_x= torch.autograd.grad(
             inputs=pts,
-            outputs=vux,
-            grad_outputs=torch.ones_like(vux).to(device),
+            outputs=vxT,
+            grad_outputs=torch.ones_like(vxT).to(device),
             create_graph=True,
             retain_graph=True
-        )[0]
-        vu_grad_y = torch.autograd.grad(
+        )[0][:,1:2]
+
+        vT_y= torch.autograd.grad(
             inputs=pts,
-            outputs=vuy,
-            grad_outputs=torch.ones_like(vuy).to(device),
+            outputs=vyT,
+            grad_outputs=torch.ones_like(vyT).to(device),
             create_graph=True,
             retain_graph=True
-        )[0]
+        )[0][:,2:3]
 
-        vu_x = vu_grad_x[:,1:2]
-        vu_y = vu_grad_y[:,2:3]
-        advection = vu_x + vu_y
+        # vT_x = vT_grad[:,1:2]
+        # vT_y = vT_grad[:,2:3]
 
- 
+        advection = vT_x + vT_y
+
         """Residual"""
-        # TODO: fix diffusion
-        D = self.d_fn(pts)
-        residual_diffusion = u_t - D * (u_xx+u_yy) + advection  # Heat Equation
-        residual = residual_diffusion 
-        r2 = residual_diffusion**2 
+        residual = T_t - diffusion + advection  # Heat Equation
+        r2 = residual**2 
 
-        """Heat Flux"""
-        qx = -self.d_fn(pts) * u_x
-        qy = -self.d_fn(pts) * u_y
-        q = torch.hstack([qx,qy])
-
-        return u, residual, r2, q, qx, qy
+        return {"T": T, "residual": residual, "r2": r2}
 
     def train_step(self):
 
         """Sample pts"""
-        pts_ic, u_ic = self.sample_ics()
         pts_col = self.sample_collocation(adaptive_sample=self.adaptive_resample)
-        _pts_bc, bc_true, periodic_bc_pts, dirchelet_bc_pts, neumann_bc_pts, edge_list = self.sample_bcs()
+        self.sample_ics()
+        self.sample_bcs()
 
         """Reset grads"""
         self.adam.zero_grad()
-        self.lbfgs.zero_grad()
 
-        """Initial Conditions"""
-        u_ic_pred = self.net(pts_ic)
-        loss_u_ic = self.loss_fn(u_ic_pred,u_ic)
+        """Boundaries"""
+        loss_bc = self.loss_bc()
+        loss_ic = self.loss_ic()
 
-        """Boundary Pts"""
-        # periodic_pred = [self.net(pts) for pts in periodic_bc_pts]
-        # dirchelet_pred = [self.net(pts) for pts in dirchelet_bc_pts]
-        # TODO: handle neumann
-        # neumann_pred = [q for _u, _res, _r2, q, qx, qy in [self.governing_eq(pts) for pts in neumann_bc_pts]]
-        # bc_pred = torch.vstack(periodic_pred + dirchelet_pred)
-        bc_l = torch.ones_like(edge_list[0][:,1:2], device=device, requires_grad=True)*1
-        bc_r = torch.ones_like(edge_list[1][:,1:2], device=device, requires_grad=True)*-1
-        bc_d = torch.ones_like(edge_list[2][:,2:3], device=device, requires_grad=True)*0
-        bc_u = torch.ones_like(edge_list[3][:,2:3], device=device, requires_grad=True)*0
-        _u, _res, _r2, _q, qx_l, _qy = self.governing_eq(edge_list[0])
-        _u, _res, _r2, _q, qx_r, _qy = self.governing_eq(edge_list[1])
-        _u, _res, _r2, _q, _qx, qy_d = self.governing_eq(edge_list[2])
-        _u, _res, _r2, _q, _qx, qy_u = self.governing_eq(edge_list[3])
-        bc_true = torch.vstack([bc_l,bc_r,bc_d,bc_u])
-        bc_pred = torch.vstack([qx_l,qx_r,qy_d,qy_u])
-        loss_u_bc = self.loss_fn(bc_pred, bc_true)
 
         """Collocation pts"""
-        _u , _residual, r2, _q, _qx, _qy = self.governing_eq(pts_col)
+        summary = self.governing_eq(pts_col)
+        r2 = summary["r2"]
         loss_physics = torch.mean(r2)
-        loss_physics_res_penalty = torch.max(r2)#torch.maximum(torch.max(r2),torch.Tensor([10000]).to(device)) #torch.max(r2)
-
-        """Known Data"""
-        # known_pts = torch.linspace(*self.t_bounds,7).to(device).requires_grad_(True).reshape(-1,1)
-        # u_known_true = self.oscillator_true(known_pts)
-        # u_known_pred = self.net(self.normalize_pts(nown_pts))
-        # loss_known = self.loss_fn(u_known_pred, u_known_true)
+        loss_physics_res_penalty = torch.max(r2)
 
         """Loss"""
-        loss = self.ic_weight*loss_u_ic + self.phys_weight*loss_physics + self.bc_weight*loss_u_bc + self.res_weight*loss_physics_res_penalty
+        loss = self.ic_weight*loss_ic + self.bc_weight*loss_bc + self.res_weight*loss_physics_res_penalty + self.phys_weight*loss_physics 
         loss.backward()
         return loss
     
-    def train(self, n_epochs=500, mode='Adam', reporting_frequency=500, phys_weight=None, res_weight=None, bc_weight=None, ic_weight=None):
+    def train(self, n_epochs=500, reporting_frequency=500, phys_weight=None, res_weight=None, bc_weight=None, ic_weight=None):
         if phys_weight is not None:
           self.phys_weight = phys_weight
         if  res_weight is not None:
@@ -564,47 +542,19 @@ class PINN_2D:
           self.bc_weight = bc_weight
         if ic_weight is not None:
           self.ic_weight = ic_weight
-        results = {
-            "loss": []
-        }
         for it in tqdm(range(n_epochs)):
-            loss = self.adam.step(self.train_step) if mode == "Adam" else self.lbfgs.step(self.train_step)
-            results["loss"].append(loss.item())
+            loss = self.adam.step(self.train_step) 
             self.loss_history.append(loss.item())
             if it % reporting_frequency == 0:
               print(f"Epoch {it:05d} Loss: {loss.item()}")
-              if it > 0:
-                if loss.item() < self.loss_history[-1]:
-                  torch.save(self.net.state_dict(), f"./models/net.pth")
-        self.runs.append(results)
     
-    def plot_ics(self):
-      with torch.no_grad():
-        pts, u = self.sample_ics()
-        pts = pts.cpu()
-        u = u.cpu()
-        fig,ax = plt.subplots(1,1)
-        ax.scatter(pts[:,1],pts[:,2], s=1, c=u.flatten(), cmap="plasma")
-        ax.set_aspect("equal")
-        plt.show()
-
-    def plot_bcs(self):
-      pts, u, _,_,_, edge_list = self.sample_bcs()
-      pts.cpu()
+    def plot_bcs_and_ics(self, mode="Truth", ct=1000):
       fig = go.Figure()
-      scatter = go.Scatter3d(
-        x=pts[:,1].cpu().detach().flatten(),
-        y=pts[:,2].cpu().detach().flatten(),
-        z=pts[:,0].cpu().detach().flatten(),
-        mode="markers",
-        marker=dict(
-          size=1.5,
-          color=u.flatten().cpu(),
-          colorscale="plasma",
-          colorbar=dict(thickness=20)
-        )
-      )
-      fig.add_trace(scatter)
+      for ic in self.ICs:
+        ic.add_truth_to_fig(fig, ct=ct, z=True) if mode == 'Truth' else ic.add_error_to_fig(fig, ct=ct)
+      for bc in self.BCs:
+        bc.add_truth_to_fig(fig, ct=ct) if mode == 'Truth' else bc.add_error_to_fig(fig, ct=ct)
+
       fig.update_layout(
         coloraxis=dict(colorscale='plasma'), 
         showlegend=False,
@@ -624,7 +574,6 @@ class PINN_2D:
     def plot_3d(self,res=200, t=0):
       with torch.no_grad():
         fig = go.Figure()
-        # t = torch.linspace(*self.t_bounds,res).to(device)
         t = torch.ones((res*res,1),device=device)*t
         x = torch.linspace(*self.space_bounds,res).to(device)
         y = torch.linspace(*self.space_bounds,res).to(device)
@@ -671,68 +620,172 @@ class PINN_2D:
       with torch.no_grad():
         for i in range(n):
           self.plot_3d(res,t[i])
-              
-    def plot_config_and_res(self):
-      all_pts = []
-      known_pts = []
-      known_vals = []
-      known_preds = []
 
-      old_col_ct = self.collocation_ct
-      self.collocation_ct = 1000
-      for i in range(50):
-          # ICs
-          pts_ic, u_ic = self.sample_ics()
-          known_pts.append(pts_ic)
-          known_vals.append(u_ic)
-          known_preds.append(self.net(pts_ic))
+class BC:
+  def __init__(self, 
+    truth_fn, 
+    pred_fn, 
+    ct=1000,
+    axis_bounds=[[0,4*np.pi], [-4*np.pi, 4*np.pi], [-4*np.pi, -4*np.pi]], 
+    requires_grad=False
+  ) -> None:
+    self.parent: Union[PINN_2D, None] = None
+    self.ct = ct
+    self.truth_fn = truth_fn
+    self.pred_fn = pred_fn
+    self.requires_grad = requires_grad
+    self.axis_bounds = torch.Tensor(axis_bounds).to(device).requires_grad_(self.requires_grad)
+    self.axis_mins = self.axis_bounds[:,0]
+    self.axis_ranges = self.axis_bounds[:,1] - self.axis_bounds[:,0]
+    self.pts = None
+    self.truth = None
+    self.pred = None
+  
+  def sample(self, cache=False, predict=False, ct=None):
+    pts = torch.rand((self.ct if ct == None else ct, self.parent.dim), device=device, requires_grad=self.requires_grad)*self.axis_ranges+ self.axis_mins
+    
+    truth = self.truth_fn(self.parent, pts)
+    if cache:
+      self.pts = pts
+      self.truth = truth
+    pred = None
+    if predict:
+      pred = self.predict(pts, cache=cache)
 
-          # BCs
-          pts_bc, bc_true, periodic_bc_pts, dirchelet_bc_pts, neumann_bc_pts, edge_list = self.sample_bcs()
-          periodic_pred = [self.net(pts) for pts in periodic_bc_pts]
-          dirchelet_pred = [self.net(pts) for pts in dirchelet_bc_pts]
-          neumann_pred = [q for _u, _res, _r2, q, qx, qy in [self.governing_eq(pts) for pts in neumann_bc_pts]]
-          bc_pred = torch.vstack(periodic_pred + dirchelet_pred + neumann_pred)
-          known_pts.append(pts_bc)
-          known_vals.append(bc_true)
-          known_preds.append(bc_pred)
+    return {"pts": pts, "truth": truth, "pred": pred}
+  
+  def predict(self, pts=None, cache=False):
+    pred = self.pred_fn(self.parent, pts ) if pts != None else self.pred_fn(self.parent, self.pts)
+    if cache:
+      self.pred = pred
+    return pred
+  
+  def add_truth_to_fig(self,fig,ct,z=False):
+    result = self.sample(cache=False, predict=False, ct=ct)
+    pts = result["pts"].detach().cpu()
+    true = result["truth"].detach().cpu()
+    scat = go.Scatter3d(
+      x=pts[:,1],
+      y=pts[:,2],
+      z=true if z else pts[:,0],
+      mode="markers",
+      marker=dict(
+        size=2,
+        color=true.flatten(),
+        colorscale="plasma"
+      )
+    )
+    fig.add_trace(scat)
+  
+  def add_error_to_fig(self, fig, ct):
+    result = self.sample(cache=False, predict=True, ct=ct)
+    pts = result["pts"].detach().cpu()
+    true = result["truth"].detach()
+    pred = result["pred"].detach()
+    err = (pred-true)**2
+    err = err.cpu()
+    scat = go.Scatter3d(
+      x=pts[:,1],
+      y=pts[:,2],
+      z=pts[:,0],
+      mode="markers",
+      marker=dict(
+        size=2,
+        color=err.flatten(),
+        colorscale="plasma"
+      )
+    )
+    fig.add_trace(scat)
+  
+def get_d(pts):
+  return torch.sqrt(torch.sum(pts[:,1:]**2, axis=1)).reshape(-1,1)
 
-          pts_col = self.sample_collocation()
-          all_pts.append(pts_col)
-      self.collocation_ct = old_col_ct
+if __name__ == "__main__":
+
+  model_path = Path(os.path.abspath(os.path.dirname(__file__))) / "models" / "new-bc-method.pth"
+  t_bounds = [0, 8*np.pi]
+  s_bounds = [-4*np.pi, 4*np.pi]
+  d_fn = lambda pts: pts[:,1:2]*0 + 4
+
+  bc_d_fn = lambda pinn, pts: pts[:,1:2]*0
+  bc_u_fn = lambda pinn, pts: pts[:,1:2]*0
+  bc_l_fn = lambda pinn, pts: 1-torch.abs(pts[:,2:3]/pinn.y_range)*2
+  bc_r_fn = lambda pinn, pts: (1-torch.abs(pts[:,2:3]/pinn.y_range)*2)*(-1)
+  bc_d_pred_fn = lambda pinn, pts: pinn.heat_flux(pts)["q_y"]
+  bc_u_pred_fn = lambda pinn, pts: pinn.heat_flux(pts)["q_y"]
+  bc_l_pred_fn = lambda pinn, pts: pinn.heat_flux(pts)["q_x"]
+  bc_r_pred_fn = lambda pinn, pts: pinn.heat_flux(pts)["q_x"]
 
 
-      known_pts = torch.vstack(known_pts)
-      known_vals = torch.vstack(known_vals)
-      known_preds = torch.vstack(known_preds)
+  gaussian_height = 15
+  gaussian_sigma = 5
+  ic_fn = lambda pinn, pts:  gaussian_height*(1/(gaussian_sigma*np.sqrt(2*np.pi)))*torch.exp(-(get_d(pts)**2) / (2*gaussian_sigma**2))
+  ic_pred_fn = lambda pinn, pts: pinn.net(pts)
 
-      # Collocation pts
-      pts = torch.vstack(all_pts)
-      _u, _res, r2, q, qx, qy = self.governing_eq(pts)
-      d = self.d_fn(pts)
-      pts = pts.detach().cpu()
-      r2 = r2.detach().cpu()
-      q = q.detach().cpu()
-      d = d.detach().cpu()
-      plt.title("Diffusivity")
-      plt.scatter(pts[:,0].flatten(), pts[:,1].flatten(), s=0.5, c=d, cmap="plasma")
-      plt.colorbar()
-      plt.figure()
-      plt.title("PDE Residual")
-      plt.scatter(pts[:,0].flatten(), pts[:,1].flatten(), s=0.5, c=r2, cmap="plasma")
-      plt.colorbar()
 
-      plt.figure()
-      plt.title("q")
-      plt.scatter(pts[:,0].flatten(), pts[:,1].flatten(), s=0.5, c=q, cmap="plasma")
-      plt.colorbar()
+  bc_d = BC(
+    ct=500,
+    truth_fn=bc_d_fn, 
+    pred_fn=bc_d_pred_fn,
+    axis_bounds=[t_bounds, s_bounds, [s_bounds[0], s_bounds[0]]], 
+    requires_grad=True,
+  )
+  bc_u = BC(
+    ct=500,
+    truth_fn=bc_u_fn, 
+    pred_fn=bc_u_pred_fn,
+    axis_bounds=[t_bounds, s_bounds, [s_bounds[1], s_bounds[1]]], 
+    requires_grad=True,
+  )
+  bc_l = BC(
+    ct=500,
+    truth_fn=bc_l_fn,
+    pred_fn=bc_l_pred_fn,
+    axis_bounds=[t_bounds, [s_bounds[0], s_bounds[0]], s_bounds], 
+    requires_grad=True,
+  )
+  bc_r = BC(
+    ct=500,
+    truth_fn=bc_r_fn,
+    pred_fn=bc_r_pred_fn,
+    axis_bounds=[t_bounds, [s_bounds[1], s_bounds[1]], s_bounds], 
+    requires_grad=True,
+  )
+  ic = BC(
+    ct=2000,
+    truth_fn=ic_fn,
+    pred_fn=ic_pred_fn,
+    axis_bounds=[[t_bounds[0], t_bounds[0]], s_bounds, s_bounds], 
+    requires_grad=False,
+  )
+  bcs = [bc_d, bc_u, bc_l, bc_r]
+  ics = [ic]
 
-      # Boundary pts
-      error = (known_vals - known_preds)**2
-      pts = known_pts.detach().cpu()
-      error = error.detach().cpu()
-      plt.figure()
-      plt.title("Boundary Error")
-      plt.scatter(pts[:,0].flatten(), pts[:,1].flatten(), s=0.5, c=error, cmap="plasma")
-      plt.colorbar()
-      plt.show()
+  pinn = PINN_2D(
+      net=MLP(input_dim=3, hidden_layer_ct=10,hidden_dim=256, act=F.tanh, learnable_act="SINGLE"), 
+      bcs=bcs,
+      ics=ics,
+      collocation_ct=2500, 
+      d_fn=d_fn,
+      t_bounds=t_bounds, 
+      space_bounds=s_bounds,
+      lr=1e-3,
+      adaptive_resample=True,
+  )
+
+  # pinn.plot_bcs_and_ics("Truth", 2000)
+
+  for i in range(10):
+    print(f"MetaEpoch: {i}")
+    if i == 0:
+        pinn.adam.param_groups[0]["lr"] = 1e-3
+    if i == 1:
+        pinn.adam.param_groups[0]["lr"] = 1e-4
+    if i == 2:
+        pinn.adam.param_groups[0]["lr"] = 5e-5
+    if i == 3:
+        pinn.adam.param_groups[0]["lr"] = 1e-5
+    if i == 4:
+        pinn.adam.param_groups[0]["lr"] = 5e-6
+    pinn.train(n_epochs=1000, reporting_frequency=100, phys_weight=1, res_weight=0.01, bc_weight=8, ic_weight=4)
+    torch.save(pinn.net.state_dict(), model_path)
