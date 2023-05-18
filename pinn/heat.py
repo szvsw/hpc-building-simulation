@@ -359,11 +359,11 @@ class PINN_2D:
           bc.parent = self
         
         """ReLoBRaLo"""
+        self.lambda_Temp = 0.1
+        self.losses_prev = torch.Tensor([1,1,1]).to(device)
         # self.lambda_alpha = 0.999
         # self.lambda_rho = 0.99
-        # self.lambda_Temp = 0.1
         # self.losses_init = torch.Tensor([1,1,1]).to(device)
-        # self.losses_prev = torch.Tensor([1,1,1]).to(device)
         # self.lambdas = torch.Tensor([1,1,1]).to(device)
         self.soft_adapt_weights = soft_adapt_weights
 

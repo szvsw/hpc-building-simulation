@@ -74,9 +74,25 @@ def update_mesh_vertices(u: ti.template(), mesh_colors:ti.template(), vertices: 
         mesh_colors[i+RES*j].z = ti.cast((colormap_field[level_idx].z * (1-colorphase) + colorphase*colormap_field[level_idx+1].z)/255, ti.float32)
 
 @ti.kernel
-def update_colors(u:ti.template(), colors: ti.template(), colormap_field: ti.template(), u_min: float, u_range: float):
+def update_colors(
+    T: ti.template(), 
+    u:ti.template(), 
+    v:ti.template(), 
+    V: ti.template(), 
+    colors: ti.template(), 
+    colormap_field: ti.template(), 
+    T_min: float, 
+    T_range: float,
+    u_min: float, 
+    u_range: float,
+    v_min: float, 
+    v_range: float,
+    V_min: float,
+    V_range: float,
+):
     for i,j in u:
-        h = ti.cast(u[i,j] - u_min, ti.float32)/u_range
+        # Temperature (LOWER LEFT)
+        h = ti.cast(T[i,j] - T_min, ti.float32)/T_range
         
         level = ti.max(ti.min(ti.floor(h*(colormap_field.shape[0]-1)),colormap_field.shape[0]-2), 0)
         colorphase = ti.cast(ti.min(ti.max(h*(colormap_field.shape[0]-1) - level, 0),1), ti.f32)
@@ -86,15 +102,39 @@ def update_colors(u:ti.template(), colors: ti.template(), colormap_field: ti.tem
         colors[i,j].y = ti.cast((colormap_field[level_idx].y * (1-colorphase) + colorphase*colormap_field[level_idx+1].y)/255, ti.float32)
         colors[i,j].z = ti.cast((colormap_field[level_idx].z * (1-colorphase) + colorphase*colormap_field[level_idx+1].z)/255, ti.float32)
 
-        # h = ti.abs(ti.cast(self.q[i,j], ti.float32))
+        # Vorticity (UPPER LEFT)
+        h = ti.cast(V[i,j] - V_min, ti.float32)/V_range
+        
+        level = ti.max(ti.min(ti.floor(h*(colormap_field.shape[0]-1)),colormap_field.shape[0]-2), 0)
+        colorphase = ti.cast(ti.min(ti.max(h*(colormap_field.shape[0]-1) - level, 0),1), ti.f32)
+        level_idx = ti.cast(level, dtype=int)
 
-        # level = ti.max(ti.min(ti.floor(h*(self.colormap_field.shape[0]-1)),self.colormap_field.shape[0]-2), 0)
-        # colorphase = ti.cast(ti.min(ti.max(h*(self.colormap_field.shape[0]-1) - level, 0),1), ti.f32)
-        # level_idx = ti.cast(level, dtype=int)
+        colors[RES+i,j].x = ti.cast((colormap_field[level_idx].x * (1-colorphase) + colorphase*colormap_field[level_idx+1].x)/255, ti.float32)
+        colors[RES+i,j].y = ti.cast((colormap_field[level_idx].y * (1-colorphase) + colorphase*colormap_field[level_idx+1].y)/255, ti.float32)
+        colors[RES+i,j].z = ti.cast((colormap_field[level_idx].z * (1-colorphase) + colorphase*colormap_field[level_idx+1].z)/255, ti.float32)
 
-        # self.colors[i,j+self.n].x = ti.cast((self.colormap_field[level_idx].x * (1-colorphase) + colorphase*self.colormap_field[level_idx+1].x)/255, ti.float32)
-        # self.colors[i,j+self.n].y = ti.cast((self.colormap_field[level_idx].y * (1-colorphase) + colorphase*self.colormap_field[level_idx+1].y)/255, ti.float32)
-        # self.colors[i,j+self.n].z = ti.cast((self.colormap_field[level_idx].z * (1-colorphase) + colorphase*self.colormap_field[level_idx+1].z)/255, ti.float32)
+        # u-velocity
+        h = ti.cast(u[i,j] - u_min, ti.float32)/u_range
+        
+        level = ti.max(ti.min(ti.floor(h*(colormap_field.shape[0]-1)),colormap_field.shape[0]-2), 0)
+        colorphase = ti.cast(ti.min(ti.max(h*(colormap_field.shape[0]-1) - level, 0),1), ti.f32)
+        level_idx = ti.cast(level, dtype=int)
+
+        colors[i,RES+j].x = ti.cast((colormap_field[level_idx].x * (1-colorphase) + colorphase*colormap_field[level_idx+1].x)/255, ti.float32)
+        colors[i,RES+j].y = ti.cast((colormap_field[level_idx].y * (1-colorphase) + colorphase*colormap_field[level_idx+1].y)/255, ti.float32)
+        colors[i,RES+j].z = ti.cast((colormap_field[level_idx].z * (1-colorphase) + colorphase*colormap_field[level_idx+1].z)/255, ti.float32)
+
+        # v-velocity
+        h = ti.cast(v[i,j] - v_min, ti.float32)/v_range
+        
+        level = ti.max(ti.min(ti.floor(h*(colormap_field.shape[0]-1)),colormap_field.shape[0]-2), 0)
+        colorphase = ti.cast(ti.min(ti.max(h*(colormap_field.shape[0]-1) - level, 0),1), ti.f32)
+        level_idx = ti.cast(level, dtype=int)
+
+        colors[RES+i,RES+j].x = ti.cast((colormap_field[level_idx].x * (1-colorphase) + colorphase*colormap_field[level_idx+1].x)/255, ti.float32)
+        colors[RES+i,RES+j].y = ti.cast((colormap_field[level_idx].y * (1-colorphase) + colorphase*colormap_field[level_idx+1].y)/255, ti.float32)
+        colors[RES+i,RES+j].z = ti.cast((colormap_field[level_idx].z * (1-colorphase) + colorphase*colormap_field[level_idx+1].z)/255, ti.float32)
+
 
 colormap = [
     [64,57,144],
@@ -113,15 +153,13 @@ if __name__ == "__main__":
     model_path =  "new-bc-method.pth"
     OUTPUT_DIM=4
     USE_MESH = False
-    PLOT_Q = False
-    PLOT_VORTICITY = False
-    dt = 0.001
+    dt = 0.01
     t_bounds = [0, 8*np.pi]
     s_bounds = [-4*np.pi, 4*np.pi]
-    t_min, t_range = -3, 6
-    # t_min, t_range = -0.1, 0.3
-    q_min, q_range = 0.0, 0.1
-    u_min, u_range = q_min if PLOT_Q else t_min, q_range if PLOT_Q else t_range
+    T_min, T_range = -1,2
+    u_min, u_range = -0.01, 0.02
+    v_min, v_range = -1.5, 3#-0.5, 1
+    V_min, V_range = -0.01, 0.02
 
     mesh_height = 2.0
 
@@ -138,11 +176,16 @@ if __name__ == "__main__":
     """Fields"""
     ti.init(arch=ti.gpu)
     pts_chi = ti.Vector.field(2, ti.f32, shape=(RES, RES))
+    T_chi = ti.field(ti.f32, shape=(RES, RES))
+    v_chi = ti.field(ti.f32, shape=(RES, RES))
     u_chi = ti.field(ti.f32, shape=(RES, RES))
+    V_chi = ti.field(ti.f32, shape=(RES, RES))
+    q_chi = ti.field(ti.f32, shape=(RES, RES))
+    vel_chi = ti.field(ti.f32, shape=(RES, RES))
     vertices = ti.Vector.field(3,ti.f32,shape=(RES*RES))
     indices = ti.field(dtype=int, shape=(3*2*(RES-1)**2))
     mesh_colors = ti.Vector.field(3,dtype=ti.float32, shape=(RES**2)) # mesh        
-    colors = ti.Vector.field(3,dtype=ti.float32, shape=(RES,RES)) # image            
+    colors = ti.Vector.field(3,dtype=ti.float32, shape=(2*RES,2*RES)) # image            
     colormap_field = ti.Vector.field(3, dtype=ti.f32, shape=len(colormap))
 
     init_pts(pts=pts_chi, s_min=s_min, s_range=s_range)
@@ -177,51 +220,54 @@ if __name__ == "__main__":
     while window.running:
         pts[:,0] = t_steps[it]
         R = net(pts)
-        T = R[:,0:1]
+        T = R[:,0:1] 
         u = R[:,1:2]
         v = R[:,2:3]
         p = R[:,3:4]
-        V = torch.sqrt(u**2 + v**2)
-        if PLOT_Q:
-            grad = torch.autograd.grad(
-                inputs=pts,
-                outputs=T,
-                grad_outputs=torch.ones_like(T),
-                create_graph=False,
-                retain_graph=False
-            )[0]
-            q = grad[:,1:]
-            q = torch.sqrt(torch.sum(q**2, axis=1)).reshape(RES,RES)
-            u_chi.from_torch(q)
-        elif PLOT_VORTICITY:
-            u_y = torch.autograd.grad(
-                inputs=pts,
-                outputs=u,
-                grad_outputs=torch.ones_like(T),
-                create_graph=True,
-                retain_graph=True
-            )[0][:,2:3]
-            v_x = torch.autograd.grad(
-                inputs=pts,
-                outputs=v,
-                grad_outputs=torch.ones_like(T),
-                create_graph=False,
-                retain_graph=False
-            )[0][:,1:2]
-            vorticity = v_x-u_y
-            vorticity = vorticity.reshape(RES,RES)
-            u_chi.from_torch(vorticity)
-        else:
-            T = T.reshape(RES,RES)
-            u_chi.from_torch(T)
+        
+        T_grad = torch.autograd.grad(
+            inputs=pts,
+            outputs=T,
+            grad_outputs=torch.ones_like(T),
+            create_graph=True,
+            retain_graph=True
+        )[0]
+        T_x = T_grad[:,1:2]
+        T_y = T_grad[:,2:3]
+        q_mag = torch.sqrt(T_x**2+T_y**2)
+
+        vel_mag = torch.sqrt(u**2 + v**2)
+        u_y = torch.autograd.grad(
+            inputs=pts,
+            outputs=u,
+            grad_outputs=torch.ones_like(u),
+            create_graph=True,
+            retain_graph=True
+        )[0][:,2:3]
+        v_x = torch.autograd.grad(
+            inputs=pts,
+            outputs=v,
+            grad_outputs=torch.ones_like(v),
+            create_graph=False,
+            retain_graph=False
+        )[0][:,1:2]
+        vorticity = v_x-u_y
+        T_chi.from_torch(T.reshape(RES,RES))
+        u_chi.from_torch(u.reshape(RES,RES))
+        v_chi.from_torch(v.reshape(RES,RES))
+        V_chi.from_torch(vorticity.reshape(RES,RES))
+        q_chi.from_torch(T_y.reshape(RES,RES))
+        # vel_chi.from_torch(vel_mag.reshape(RES,RES))
 
         if it % 100 == 0:
-            print("")
-            print(f"min u:{torch.min(T).item()}, max u:{torch.max(T).item()}, SUM:{torch.sum(T).item()}")
-            if PLOT_Q:
-                print(f"min q:{torch.min(q).item()}, max q:{torch.max(q).item()}, SUM:{torch.sum(q).item()}")
-            if PLOT_VORTICITY:
-                print(f"min vort:{torch.min(vorticity).item()}, max vort:{torch.max(vorticity).item()}, SUM:{torch.sum(vorticity).item()}")
+            print(f"---{it}---")
+            print(f"T:{torch.min(T).item()},{torch.max(T).item()}")
+            print(f"u:{torch.min(u).item()},{torch.max(u).item()}")
+            print(f"v:{torch.min(v).item()},{torch.max(v).item()}")
+            print(f"V:{torch.min(vorticity).item()},{torch.max(vorticity).item()}")
+            # print(f"vel:{torch.min(vel_mag).item()},{torch.max(vel_mag).item()}")
+            print(f"q:{torch.min(q_mag).item()},{torch.max(q_mag).item()}")
+            print(f"T_y:{torch.min(T_y).item()},{torch.max(T_y).item()}")
 
         if USE_MESH:
             camera_t += camera_speed
@@ -234,7 +280,22 @@ if __name__ == "__main__":
             scene.mesh(vertices, indices, per_vertex_color=mesh_colors)
             canvas.scene(scene)
         else:
-            update_colors(u_chi, colors, colormap_field, u_min, u_range)
+            update_colors(
+                T=T_chi, # LL
+                V=V_chi, # LR
+                u=u_chi, # UL
+                v=q_chi, # UR
+                colors=colors,
+                colormap_field=colormap_field,
+                T_min=T_min,
+                T_range=T_range,
+                u_min=u_min,
+                u_range=u_range,
+                v_min=v_min,
+                v_range=v_range,
+                V_min=V_min,
+                V_range=V_range,
+            )
             canvas.set_image(colors)
 
         window.show()
