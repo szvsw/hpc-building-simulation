@@ -319,7 +319,8 @@ class PINN_2D:
       t_bounds=[0,4], 
       space_bounds=[-2*np.pi,2*np.pi],
       d_fn=lambda pts: pts[:,1:2]*0 + 5,
-      adaptive_resample=False
+      adaptive_resample=False,
+      soft_adapt_weights=False
     ) -> None:
         self.net = net.to(device)
         self.t_bounds = t_bounds
@@ -356,6 +357,17 @@ class PINN_2D:
         self.ICs: List[BC] = ics
         for bc in bcs+ics:
           bc.parent = self
+        
+        """ReLoBRaLo"""
+        # self.lambda_alpha = 0.999
+        # self.lambda_rho = 0.99
+        # self.lambda_Temp = 0.1
+        # self.losses_init = torch.Tensor([1,1,1]).to(device)
+        # self.losses_prev = torch.Tensor([1,1,1]).to(device)
+        # self.lambdas = torch.Tensor([1,1,1]).to(device)
+        self.soft_adapt_weights = soft_adapt_weights
+
+        self.it = 0
     
     def sample_ics(self):
       for ic in self.ICs:
@@ -529,8 +541,46 @@ class PINN_2D:
         loss_physics_res_penalty = torch.max(r2)
 
         """Loss"""
-        loss = self.ic_weight*loss_ic + self.bc_weight*loss_bc + self.res_weight*loss_physics_res_penalty + self.phys_weight*loss_physics 
-        loss.backward()
+
+        if self.soft_adapt_weights:
+          with torch.no_grad():
+            losses = torch.hstack([loss_ic, loss_bc, loss_physics])
+            top = torch.exp(self.lambda_Temp * (self.losses_prev - losses))
+            lambdas = top / torch.sum(top)
+            self.losses_prev = losses
+            # failed attempt at ReLoBRraLo
+            # alpha = self.lambda_alpha
+            # rho = torch.bernoulli(torch.tensor(self.lambda_rho))
+            # if self.it == 0:
+            #   alpha = 1
+            #   rho = 1
+            # elif self.it == 1:
+            #   alpha = 0
+            #   rho = 1
+            # losses = torch.hstack([loss_ic, loss_bc, loss_physics])
+            # lambda_hats_prev = torch.exp(losses / (self.losses_prev*self.lambda_Temp + 1e-3)) 
+            # lambda_hats_init = torch.exp(losses / (self.losses_init*self.lambda_Temp + 1e-3)) 
+            # n_losses = losses.shape[0]
+            # lambda_bal_prev = n_losses * lambda_hats_prev / torch.sum(lambda_hats_prev)
+            # lambda_bal_init = n_losses * lambda_hats_init / torch.sum(lambda_hats_init)
+            # lambda_hist = rho*self.lambdas - (1-rho)*lambda_bal_init
+            # lambdas = torch.minimum(alpha * lambda_hist - (1-alpha) * lambda_bal_prev, 10*torch.ones_like(self.lambdas))
+            # self.lambdas = lambdas
+            # if self.it == 0:
+            #   self.losses_init = losses
+            # self.loss_prev = losses
+
+
+          loss = torch.sum(lambdas * torch.hstack([ loss_ic, loss_bc, loss_physics ]))
+          loss.backward()
+        else:
+          loss = self.ic_weight*loss_ic + self.bc_weight*loss_bc + self.res_weight*loss_physics_res_penalty + self.phys_weight*loss_physics 
+          loss.backward()
+        if self.it % 100 == 0:
+          weighted_loss = self.ic_weight*loss_ic + self.bc_weight*loss_bc + self.res_weight*loss_physics_res_penalty + self.phys_weight*loss_physics 
+          print("cur loss", loss_ic.item(), loss_bc.item(), loss_physics.item())
+          print("weighted-loss", weighted_loss.item())
+        self.it = self.it + 1
         return loss
     
     def train(self, n_epochs=500, reporting_frequency=500, phys_weight=None, res_weight=None, bc_weight=None, ic_weight=None):
@@ -703,6 +753,8 @@ def get_d(pts):
 if __name__ == "__main__":
 
   model_path = Path(os.path.abspath(os.path.dirname(__file__))) / "models" / "new-bc-method.pth"
+  ADAPTIVE_SAMPLING = True
+  ADAPTIVE_WEIGHTING = True
   t_bounds = [0, 8*np.pi]
   s_bounds = [-4*np.pi, 4*np.pi]
   d_fn = lambda pts: pts[:,1:2]*0 + 4
@@ -770,7 +822,8 @@ if __name__ == "__main__":
       t_bounds=t_bounds, 
       space_bounds=s_bounds,
       lr=1e-3,
-      adaptive_resample=True,
+      adaptive_resample=ADAPTIVE_SAMPLING,
+      soft_adapt_weights=ADAPTIVE_WEIGHTING
   )
 
   # pinn.plot_bcs_and_ics("Truth", 2000)
