@@ -504,6 +504,7 @@ class PINN_2D:
         v = torch.ones_like(torch.hstack([T,T]))
         # vy = (torch.sigmoid((pts[:,1:2] + 1.05*np.pi)*6) + torch.sigmoid((-pts[:,1:2] + 1.05*np.pi)*6))-1
         v[:,0] = 0
+        v[:,1] = 0
         # v[:,1:2] = 2
         vT = v*T
         vxT = vT[:,0:1]
@@ -794,11 +795,13 @@ if __name__ == "__main__":
   model_path = Path(os.path.abspath(os.path.dirname(__file__))) / "models" / "last_runs.pth"
   ADAPTIVE_SAMPLING = True
   ADAPTIVE_WEIGHTING = True
-  t_bounds = [0, 8*np.pi]
+  t_bounds = [0, 16*np.pi]
   s_bounds = [-4*np.pi, 4*np.pi]
   d_fn = lambda pts: pts[:,1:2]*0 + 4
   # d_fn = lambda pts: torch.sigmoid(pts[:,1:2]*6)*16 + torch.sigmoid(pts[:,2:3]*6)*8 + 0.2
   # d_fn = lambda pts: (torch.sigmoid((pts[:,1:2] + np.pi)*6) + torch.sigmoid((-pts[:,1:2] + np.pi)*6))*10-10 + 0.3
+  d_fn = lambda pts: torch.sigmoid(torch.sqrt(torch.sum(pts[:,1:]**2,axis=1).reshape(-1,1) / (16*np.pi*np.pi)))*6 + 0.2
+  d_fn = lambda pts: torch.sigmoid(torch.sin(pts[:,1:2])*torch.sin(pts[:,2:3]))*6 + 0.2
 
   # bc_l_fn = lambda pinn, pts: 1-torch.abs(pts[:,2:3]/pinn.y_range)*2
   # bc_r_fn = lambda pinn, pts: bc_l_fn(pinn, pts)*-1
@@ -806,16 +809,16 @@ if __name__ == "__main__":
   # bc_r_fn = lambda pinn, pts: torch.sin(pts[:,0:1]/2)*torch.sin(pts[:,2:3])*4
   # bc_l_pred_fn = lambda pinn, pts: pinn.heat_flux(pts)["q_x"]
   # bc_r_pred_fn = lambda pinn, pts: pinn.heat_flux(pts)["q_x"]
-  bc_l_fn = lambda pinn, pts: pts[:,1:2]*0 + 1
-  bc_r_fn = lambda pinn, pts: pts[:,1:2]*0 + 1
+  bc_l_fn = lambda pinn, pts: pts[:,1:2]*0
+  bc_r_fn = lambda pinn, pts: pts[:,1:2]*0 
   bc_l_pred_fn = lambda pinn, pts: pinn.heat_flux(pts)["q_x"]
   bc_r_pred_fn = lambda pinn, pts: pinn.heat_flux(pts)["q_x"]
   # bc_u_fn = lambda pinn, pts: torch.sign(pts[:,2:3])*2
   # bc_d_fn = lambda pinn, pts: -torch.sign(pts[:,2:3])*2
-  bc_u_fn = lambda pinn, pts: pts[:,1:2]*0
-  bc_d_fn = lambda pinn, pts: pts[:,1:2]*0
-  bc_u_pred_fn = lambda pinn, pts: pinn.net(pts)
-  bc_d_pred_fn = lambda pinn, pts: pinn.net(pts)
+  bc_u_fn = lambda pinn, pts: pts[:,1:2]*0 + 2
+  bc_d_fn = lambda pinn, pts: pts[:,1:2]*0 + 2
+  bc_u_pred_fn = lambda pinn, pts: pinn.heat_flux(pts)["q_y"]
+  bc_d_pred_fn = lambda pinn, pts: pinn.heat_flux(pts)["q_y"]
   # def up_down_periodic_bottom(pinn: PINN_2D, pts):
   #   top = pts.clone()
   #   top[:,2:3] = s_bounds[1]
@@ -896,11 +899,11 @@ if __name__ == "__main__":
       adaptive_resample=ADAPTIVE_SAMPLING,
       soft_adapt_weights=ADAPTIVE_WEIGHTING
   )
-  # pinn.plot_D(ct=4000)
+  # pinn.plot_D(ct=10000)
   # pinn.plot_IC(ct=4000)
 
 
-  for i in range(10):
+  for i in range(15):
     print(f"MetaEpoch: {i}")
     if i == 0:
         pinn.adam.param_groups[0]["lr"] = 1e-3
@@ -908,8 +911,8 @@ if __name__ == "__main__":
         pinn.adam.param_groups[0]["lr"] = 1e-4
     if i == 2:
         pinn.adam.param_groups[0]["lr"] = 5e-5
-    if i == 3:
+    if i == 5:
         pinn.adam.param_groups[0]["lr"] = 1e-5
-    if i == 4:
+    if i == 7:
         pinn.adam.param_groups[0]["lr"] = 5e-6
     pinn.train(n_epochs=1000, reporting_frequency=100, phys_weight=1, res_weight=0.01, bc_weight=8, ic_weight=4)

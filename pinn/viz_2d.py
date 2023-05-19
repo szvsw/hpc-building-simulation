@@ -134,10 +134,10 @@ def update_colors(u:ti.template(), q: ti.template(), a: ti.template(), b: ti.tem
         # self.colors[i,j+self.n].y = ti.cast((self.colormap_field[level_idx].y * (1-colorphase) + colorphase*self.colormap_field[level_idx+1].y)/255, ti.float32)
         # self.colors[i,j+self.n].z = ti.cast((self.colormap_field[level_idx].z * (1-colorphase) + colorphase*self.colormap_field[level_idx+1].z)/255, ti.float32)
     for i, j in colors:
-        if ti.abs(i-colors.shape[0]/2) < 1 or ti.abs(i-colors.shape[0]/4) < 1 or ti.abs(i-3*colors.shape[0]/4) < 1 or ti.abs(j-colors.shape[1]/2) < 1 or ti.abs(j-colors.shape[1]/4) < 1 or ti.abs(j-3*colors.shape[1]/4) < 1: 
-            colors[i,j].x = 0
-            colors[i,j].y = 0
-            colors[i,j].z = 0
+        # if ti.abs(i-colors.shape[0]/2) < 1 or ti.abs(i-colors.shape[0]/4) < 1 or ti.abs(i-3*colors.shape[0]/4) < 1 or ti.abs(j-colors.shape[1]/2) < 1 or ti.abs(j-colors.shape[1]/4) < 1 or ti.abs(j-3*colors.shape[1]/4) < 1: 
+        #     colors[i,j].x = 0
+        #     colors[i,j].y = 0
+        #     colors[i,j].z = 0
         if ti.abs(i-colors.shape[0]/2) < 3 or ti.abs(j-colors.shape[1]/2) < 3: 
             colors[i,j].x = 0
             colors[i,j].y = 0
@@ -161,12 +161,12 @@ if __name__ == "__main__":
     OUTPUT_DIM=1
     USE_MESH = False
     dt = 0.02
-    t_bounds = [0, 8*np.pi]
+    t_bounds = [0, 16*np.pi]
     s_bounds = [-4*np.pi, 4*np.pi]
-    T_min, T_range = 0, 2    # LL
-    q_min, q_range = 0.0, 0.3 # LR
-    qx_min, qx_range = -0.1, 0.2 # UL
-    qy_min, qy_range = -0.1, 0.2 #UR
+    T_min, T_range = -5.5, 11   # LL
+    q_min, q_range = 0, 0.8 # LR
+    qx_min, qx_range = -0.2, 0.4 # UL
+    qy_min, qy_range = 0, 0.9 #UR
 
     mesh_height = 2.0
 
@@ -264,7 +264,7 @@ if __name__ == "__main__":
             canvas.set_image(colors)
 
         window.show()
-        # if (it + 1) % t_steps.shape[0] == 0:
-        #     exit()
-        # window.save_image(f"pinn/videos/{it:05d}.png")
+        if (it + 1) % t_steps.shape[0] == 0:
+            exit()
+        window.save_image(f"pinn/videos/{it:05d}.png")
         it = (it + 1) % t_steps.shape[0]
