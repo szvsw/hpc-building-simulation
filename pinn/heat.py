@@ -58,6 +58,9 @@ class PINN_1D:
         self.bc_fn = bc_fn
         self.d_fn = d_fn
 
+        self.lambda_Temp = 0.1
+        self.losses_prev = torch.Tensor([1,1,1]).to(device)
+
         self.adaptive_resample = adaptive_resample
 
     def sample_ics(self):
@@ -134,25 +137,27 @@ class PINN_1D:
         u_t = grad[:,0:1]
         u_x = grad[:,1:2]
 
-        u_x_grad = torch.autograd.grad(
+        D = self.d_fn(pts)
+        Du_x = D * u_x
+
+        Du_x_grad = torch.autograd.grad(
             inputs=pts,
-            outputs=u_x,
-            grad_outputs=torch.ones_like(u_x).to(device),
+            outputs=Du_x,
+            grad_outputs=torch.ones_like(Du_x).to(device),
             create_graph=True,
             retain_graph=True
         )[0]
 
-        u_xx = u_x_grad[:,1:2]
+        Du_xx = Du_x_grad[:,1:2]
  
         """Residual"""
         # TODO: fix diffusion for multimaterial
-        D = self.d_fn(pts)
-        residual_diffusion = u_t - D * u_xx # Heat Equation
+        residual_diffusion = u_t - Du_xx # Heat Equation
         residual = residual_diffusion 
         r2 = residual_diffusion**2 
 
         """Heat Flux"""
-        q = -self.d_fn(pts) * u_x
+        q = -Du_x
 
         return u, residual, r2, q
 
@@ -188,9 +193,19 @@ class PINN_1D:
         # u_known_pred = self.net(known_pts)
         # loss_known = self.loss_fn(u_known_pred, u_known_true)
 
-        """Loss"""
-        loss = self.ic_weight*loss_u_ic + self.phys_weight*loss_physics + self.bc_weight*loss_u_bc + self.res_weight*loss_physics_res_penalty
+
+        with torch.no_grad():
+          losses = torch.hstack([loss_u_ic, loss_u_bc, loss_physics])
+          top = torch.exp(self.lambda_Temp * (self.losses_prev - losses))
+          lambdas = top / torch.sum(top)
+          self.losses_prev = losses
+
+
+        loss = torch.sum(lambdas * torch.hstack([ loss_u_ic, loss_u_bc, loss_physics ]))
         loss.backward()
+        """Loss"""
+        # loss = self.ic_weight*loss_u_ic + self.phys_weight*loss_physics + self.bc_weight*loss_u_bc + self.res_weight*loss_physics_res_penalty
+        # loss.backward()
         return loss
     
     def train(self, n_epochs=500, reporting_frequency=500, phys_weight=None, res_weight=None, bc_weight=None, ic_weight=None):
@@ -209,8 +224,6 @@ class PINN_1D:
             loss = self.adam.step(self.train_step) 
             results["loss"].append(loss.item())
             self.loss_history.append(loss.item())
-            if it % reporting_frequency == 0:
-              print(f"Loss: {loss.item()}")
         self.runs.append(results)
     
     def plot_3d(self,res=200):
@@ -344,6 +357,8 @@ class PINN_2D:
         self.adam = torch.optim.Adam(self.net.parameters(), lr=lr)
 
         self.loss_history = []
+        self.best_loss = 99999
+
 
         self.ic_weight=1,
         self.bc_weight=1
@@ -486,8 +501,10 @@ class PINN_2D:
         diffusion = DT_xx + DT_yy
 
         """Advection"""
-        v = torch.ones_like(torch.hstack([T,T]))*1.5
+        v = torch.ones_like(torch.hstack([T,T]))
+        # vy = (torch.sigmoid((pts[:,1:2] + 1.05*np.pi)*6) + torch.sigmoid((-pts[:,1:2] + 1.05*np.pi)*6))-1
         v[:,0] = 0
+        # v[:,1:2] = 2
         vT = v*T
         vxT = vT[:,0:1]
         vyT = vT[:,1:2]
@@ -512,6 +529,7 @@ class PINN_2D:
         # vT_y = vT_grad[:,2:3]
 
         advection = vT_x + vT_y
+        # advection = 2*T_y
 
         """Residual"""
         residual = T_t - diffusion + advection  # Heat Equation
@@ -577,9 +595,10 @@ class PINN_2D:
           loss = self.ic_weight*loss_ic + self.bc_weight*loss_bc + self.res_weight*loss_physics_res_penalty + self.phys_weight*loss_physics 
           loss.backward()
         if self.it % 100 == 0:
-          weighted_loss = self.ic_weight*loss_ic + self.bc_weight*loss_bc + self.res_weight*loss_physics_res_penalty + self.phys_weight*loss_physics 
-          print("cur loss", loss_ic.item(), loss_bc.item(), loss_physics.item())
-          print("weighted-loss", weighted_loss.item())
+          print("\nIC / BC / PDE", loss_ic.item(), loss_bc.item(), loss_physics.item())
+          if loss < self.best_loss:
+            self.best_loss = loss
+            torch.save(self.net.state_dict(), model_path)
         self.it = self.it + 1
         return loss
     
@@ -595,8 +614,6 @@ class PINN_2D:
         for it in tqdm(range(n_epochs)):
             loss = self.adam.step(self.train_step) 
             self.loss_history.append(loss.item())
-            if it % reporting_frequency == 0:
-              print(f"Epoch {it:05d} Loss: {loss.item()}")
     
     def plot_bcs_and_ics(self, mode="Truth", ct=1000):
       fig = go.Figure()
@@ -665,6 +682,28 @@ class PINN_2D:
         )
         fig.show()
     
+    def plot_D(self, ct):
+      pts = torch.rand((ct,3))*(self.space_bounds[1]-self.space_bounds[0]) + self.space_bounds[0]
+      pts[:,0] = 0
+      d = self.d_fn(pts).flatten()
+      print(torch.max(d))
+      print(torch.min(d))
+      plt.figure()
+      plt.scatter(pts[:,1], pts[:,2], s=1, c=d)
+      plt.colorbar()
+      plt.show()
+
+    def plot_IC(self, ct):
+      pts = torch.rand((ct,3))*(self.space_bounds[1]-self.space_bounds[0]) + self.space_bounds[0]
+      pts[:,0] = 0
+      u = self.ICs[0].truth_fn(self, pts.to(device))
+      print(torch.max(u))
+      print(torch.min(u))
+      plt.figure()
+      plt.scatter(pts[:,1], pts[:,2], s=1, c=u.detach().cpu().flatten())
+      plt.colorbar()
+      plt.show()
+
     def plot_frames(self,res=200,n=5):
       t = torch.linspace(*self.t_bounds,n).to(device)
       with torch.no_grad():
@@ -752,59 +791,91 @@ def get_d(pts):
 
 if __name__ == "__main__":
 
-  model_path = Path(os.path.abspath(os.path.dirname(__file__))) / "models" / "new-bc-method.pth"
+  model_path = Path(os.path.abspath(os.path.dirname(__file__))) / "models" / "last_runs.pth"
   ADAPTIVE_SAMPLING = True
   ADAPTIVE_WEIGHTING = True
   t_bounds = [0, 8*np.pi]
   s_bounds = [-4*np.pi, 4*np.pi]
   d_fn = lambda pts: pts[:,1:2]*0 + 4
+  # d_fn = lambda pts: torch.sigmoid(pts[:,1:2]*6)*16 + torch.sigmoid(pts[:,2:3]*6)*8 + 0.2
+  # d_fn = lambda pts: (torch.sigmoid((pts[:,1:2] + np.pi)*6) + torch.sigmoid((-pts[:,1:2] + np.pi)*6))*10-10 + 0.3
 
-  bc_d_fn = lambda pinn, pts: pts[:,1:2]*0
-  bc_u_fn = lambda pinn, pts: pts[:,1:2]*0
-  bc_l_fn = lambda pinn, pts: 1-torch.abs(pts[:,2:3]/pinn.y_range)*2
-  bc_r_fn = lambda pinn, pts: (1-torch.abs(pts[:,2:3]/pinn.y_range)*2)*(-1)
-  bc_d_pred_fn = lambda pinn, pts: pinn.heat_flux(pts)["q_y"]
-  bc_u_pred_fn = lambda pinn, pts: pinn.heat_flux(pts)["q_y"]
+  # bc_l_fn = lambda pinn, pts: 1-torch.abs(pts[:,2:3]/pinn.y_range)*2
+  # bc_r_fn = lambda pinn, pts: bc_l_fn(pinn, pts)*-1
+  # bc_l_fn = lambda pinn, pts: torch.sin(pts[:,0:1])*4
+  # bc_r_fn = lambda pinn, pts: torch.sin(pts[:,0:1]/2)*torch.sin(pts[:,2:3])*4
+  # bc_l_pred_fn = lambda pinn, pts: pinn.heat_flux(pts)["q_x"]
+  # bc_r_pred_fn = lambda pinn, pts: pinn.heat_flux(pts)["q_x"]
+  bc_l_fn = lambda pinn, pts: pts[:,1:2]*0 + 1
+  bc_r_fn = lambda pinn, pts: pts[:,1:2]*0 + 1
   bc_l_pred_fn = lambda pinn, pts: pinn.heat_flux(pts)["q_x"]
   bc_r_pred_fn = lambda pinn, pts: pinn.heat_flux(pts)["q_x"]
+  # bc_u_fn = lambda pinn, pts: torch.sign(pts[:,2:3])*2
+  # bc_d_fn = lambda pinn, pts: -torch.sign(pts[:,2:3])*2
+  bc_u_fn = lambda pinn, pts: pts[:,1:2]*0
+  bc_d_fn = lambda pinn, pts: pts[:,1:2]*0
+  bc_u_pred_fn = lambda pinn, pts: pinn.net(pts)
+  bc_d_pred_fn = lambda pinn, pts: pinn.net(pts)
+  # def up_down_periodic_bottom(pinn: PINN_2D, pts):
+  #   top = pts.clone()
+  #   top[:,2:3] = s_bounds[1]
+  #   # T = pinn.net(pts)
+  #   # T_top = pinn.net(top)
+  #   q_y = pinn.heat_flux(pts)["T_y"]
+  #   q_y_t = pinn.heat_flux(top)["T_y"]
+  #   return (q_y - q_y_t)
+  #   # return (T-T_top)
+
+  # def up_down_periodic_top(pinn: PINN_2D, pts):
+  #   bot = pts.clone()
+  #   bot[:,2:3] = s_bounds[0]
+  #   T = pinn.net(pts)
+  #   # T_b = pinn.net(bot)
+  #   q_y = pinn.heat_flux(pts)["T_y"]
+  #   q_y_b = pinn.heat_flux(bot)["T_y"]
+  #   return (q_y - q_y_b)
+  #   # return (T - T_b)
+
 
 
   gaussian_height = 15
   gaussian_sigma = 5
   ic_fn = lambda pinn, pts:  gaussian_height*(1/(gaussian_sigma*np.sqrt(2*np.pi)))*torch.exp(-(get_d(pts)**2) / (2*gaussian_sigma**2))
+  ic_fn = lambda pinn, pts: pts[:,1:2]*0
+  # ic_fn = lambda pinn, pts: (2-(torch.sigmoid((pts[:,1:2] + np.pi)*6) + torch.sigmoid((-pts[:,1:2] + np.pi)*6)))*10-5
   ic_pred_fn = lambda pinn, pts: pinn.net(pts)
 
 
   bc_d = BC(
-    ct=500,
+    ct=1000,
     truth_fn=bc_d_fn, 
     pred_fn=bc_d_pred_fn,
     axis_bounds=[t_bounds, s_bounds, [s_bounds[0], s_bounds[0]]], 
     requires_grad=True,
   )
   bc_u = BC(
-    ct=500,
+    ct=1000,
     truth_fn=bc_u_fn, 
     pred_fn=bc_u_pred_fn,
     axis_bounds=[t_bounds, s_bounds, [s_bounds[1], s_bounds[1]]], 
     requires_grad=True,
   )
   bc_l = BC(
-    ct=500,
+    ct=1000,
     truth_fn=bc_l_fn,
     pred_fn=bc_l_pred_fn,
     axis_bounds=[t_bounds, [s_bounds[0], s_bounds[0]], s_bounds], 
     requires_grad=True,
   )
   bc_r = BC(
-    ct=500,
+    ct=1000,
     truth_fn=bc_r_fn,
     pred_fn=bc_r_pred_fn,
     axis_bounds=[t_bounds, [s_bounds[1], s_bounds[1]], s_bounds], 
     requires_grad=True,
   )
   ic = BC(
-    ct=2000,
+    ct=1000,
     truth_fn=ic_fn,
     pred_fn=ic_pred_fn,
     axis_bounds=[[t_bounds[0], t_bounds[0]], s_bounds, s_bounds], 
@@ -814,7 +885,7 @@ if __name__ == "__main__":
   ics = [ic]
 
   pinn = PINN_2D(
-      net=MLP(input_dim=3, hidden_layer_ct=10,hidden_dim=256, act=F.tanh, learnable_act="SINGLE"), 
+      net=MLP(input_dim=3, hidden_layer_ct=4,hidden_dim=256, act=F.tanh, learnable_act="SINGLE"), 
       bcs=bcs,
       ics=ics,
       collocation_ct=2500, 
@@ -825,8 +896,9 @@ if __name__ == "__main__":
       adaptive_resample=ADAPTIVE_SAMPLING,
       soft_adapt_weights=ADAPTIVE_WEIGHTING
   )
+  # pinn.plot_D(ct=4000)
+  # pinn.plot_IC(ct=4000)
 
-  # pinn.plot_bcs_and_ics("Truth", 2000)
 
   for i in range(10):
     print(f"MetaEpoch: {i}")
@@ -841,4 +913,3 @@ if __name__ == "__main__":
     if i == 4:
         pinn.adam.param_groups[0]["lr"] = 5e-6
     pinn.train(n_epochs=1000, reporting_frequency=100, phys_weight=1, res_weight=0.01, bc_weight=8, ic_weight=4)
-    torch.save(pinn.net.state_dict(), model_path)

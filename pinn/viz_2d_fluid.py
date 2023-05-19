@@ -131,13 +131,30 @@ if __name__ == "__main__":
 
     model_path =  "2d-simple-neumann2d-5-heated-with-wind-adaptive.pth"
     model_path =  "new-bc-method.pth"
+    # model_path =  "heated_blocks_in_enclosure_4x256.pth"
     OUTPUT_DIM=4
     USE_MESH = False
     dt = 0.01
-    T_min, T_range = 0,1 # Tmp LL
-    u_min, u_range = 0,1 # Velocity Mag UL
-    v_min, v_range = 0,3 # T_y UR
+
+    T_min, T_range = -1,2 # Tmp LL
+    u_min, u_range = 0.5,1.5 # Velocity Mag UL
+    v_min, v_range = 0,2 # Qmag UR
     V_min, V_range = -2,4 # Vort LR
+
+    T_min, T_range = -1,2 # Tmp LL
+    u_min, u_range = 0,1 # Velocity Mag UL
+    v_min, v_range = 0,2 # Qmag UR
+    V_min, V_range = -2,4 # Vort LR
+
+    # T_min, T_range = 0,1.5 # Tmp LL
+    # u_min, u_range = 0,1 # Velocity Mag UL
+    # v_min, v_range = 0,2 # Qmag UR
+    # V_min, V_range = -1,2 # Vort LR
+
+    T_min, T_range = 0,1 # Tmp LL
+    u_min, u_range = -0.5,1 # UL
+    v_min, v_range = 0,1 # Qmag UR
+    V_min, V_range = -0.8,1.6 # Vort LR
 
     mesh_height = 2.0
 
@@ -240,6 +257,8 @@ if __name__ == "__main__":
         V_chi.from_torch(vorticity.reshape(shape))
         q_chi.from_torch(q_mag.reshape(shape))
         vel_chi.from_torch(vel_mag.reshape(shape))
+        vel_chi.from_torch(-T_x.reshape(shape))
+        # vel_chi.from_torch(p.reshape(shape))
 
         if it % 100 == 0:
             print(f"---{it}---")
@@ -251,6 +270,7 @@ if __name__ == "__main__":
             print(f"q:{torch.min(q_mag).item()},{torch.max(q_mag).item()}")
             print(f"T_x:{torch.min(T_x).item()},{torch.max(T_x).item()}")
             print(f"T_y:{torch.min(T_y).item()},{torch.max(T_y).item()}")
+            print(f"p:{torch.min(p).item()},{torch.max(p).item()}")
 
         update_colors(
             T=T_chi, # LL
@@ -271,8 +291,8 @@ if __name__ == "__main__":
         canvas.set_image(colors)
 
         window.show()
-        if k+1 % t_steps.shape[0]*3 == 0:
-            break
-        k = k+1
-        window.save_image(f"pinn/videos/{it:05d}.png")
+        # if (it + 1) % t_steps.shape[0] == 0:
+        #     exit()
+        # k = k+1
+        # window.save_image(f"pinn/videos/{it:05d}.png")
         it = (it + 1) % t_steps.shape[0]

@@ -28,10 +28,14 @@ class MLP(nn.Module):
         a = self.a[0] if self.learnable_act == "MULTI" else self.a
         x = self.act(a*x)
 
+        skip = x
         for i,layer in enumerate(self.hidden_layers):
             x = layer(x)
             a = self.a[i+1] if self.learnable_act == "MULTI" else self.a
             x = self.act(a*x)
+            if (i+1) % 2 == 0:
+                x = skip + x
+                skip = x
 
         x = self.output_layer(x)
 
