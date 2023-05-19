@@ -66,7 +66,7 @@ class PINN_2D:
 
 
         self.adaptive_resample =  adaptive_resample
-        self.collocation_pts = collocation_pts
+        self.collocation_pts: List[BC] = collocation_pts
         self.BCs: List[BC] = bcs
         self.ICs: List[BC] = ics
 
@@ -450,9 +450,11 @@ class PINN_2D:
     def plot_bcs_and_ics(self, mode="Truth", ct=1000):
       fig = go.Figure()
       for ic in self.ICs:
-        ic.add_truth_to_fig(fig, ct=ct, z=True) if mode == 'Truth' else ic.add_error_to_fig(fig, ct=ct)
+        ic.add_truth_to_fig(fig, ct=ct, flatten=True) if mode == 'Truth' else ic.add_error_to_fig(fig, ct=ct)
       for bc in self.BCs:
-        bc.add_truth_to_fig(fig, ct=ct) if mode == 'Truth' else bc.add_error_to_fig(fig, ct=ct)
+        bc.add_truth_to_fig(fig, ct=ct, flatten=True) if mode == 'Truth' else bc.add_error_to_fig(fig, ct=ct)
+      # for col in self.collocation_pts:
+      #   col.add_truth_to_fig(fig, ct=ct) if mode == 'Truth' else col.add_error_to_fig(fig, ct=ct)
 
       fig.update_layout(
         coloraxis=dict(colorscale='plasma'), 
@@ -508,7 +510,7 @@ class BC:
       self.pred = pred
     return pred
   
-  def add_truth_to_fig(self,fig,ct,z=False):
+  def add_truth_to_fig(self,fig,ct,z=False, flatten=False):
     result = self.sample(cache=False, predict=False, ct=ct)
     pts = result["pts"].detach().cpu()
     true = result["truth"].detach().cpu()
@@ -556,9 +558,9 @@ if __name__ == "__main__":
   ADAPTIVE_SAMPLING = False
   ADAPTIVE_WEIGHTING = True
 
-  RICHARDSON=0.0
-  PECLET=36
-  REYNOLDS=50
+  RICHARDSON=1.2
+  PECLET=5
+  REYNOLDS=400
 
   PRANDTL = 4.3 
   RAYLEIGH = 1000000
@@ -667,42 +669,42 @@ if __name__ == "__main__":
     return r2
 
   bc_u = BC(
-    ct=200,
+    ct=100,
     truth_fn=top_boundary_true, 
     pred_fn=Tuv_prediction,
     axis_bounds=[t_bounds, x_bounds, [y_max, y_max]], 
     requires_grad=True,
   )
   bc_l = BC(
-    ct=200,
+    ct=100,
     truth_fn=left_boundary_true,
     pred_fn=Tuv_prediction,
     axis_bounds=[t_bounds, [x_min, x_min], y_bounds], 
     requires_grad=True,
   )
   bc_r = BC(
-    ct=200,
+    ct=100,
     truth_fn=right_boundary_true,
     pred_fn=qxp_prediction,
     axis_bounds=[t_bounds, [x_max, x_max], y_bounds], 
     requires_grad=True,
   )
   box_boundary_t = BC(
-    ct=200,
+    ct=100,
     truth_fn=heated_edge,
     pred_fn=Tuv_prediction,
     axis_bounds=[t_bounds, [block_l_edge, block_r_edge], [block_t_edge, block_t_edge]], 
     requires_grad=True,
   )
   box_boundary_l= BC(
-    ct=200,
+    ct=100,
     truth_fn=heated_edge,
     pred_fn=Tuv_prediction,
     axis_bounds=[t_bounds, [block_l_edge, block_l_edge], [block_b_edge, block_t_edge]], 
     requires_grad=True,
   )
   box_boundary_r= BC(
-    ct=200,
+    ct=100,
     truth_fn=heated_edge,
     pred_fn=Tuv_prediction,
     axis_bounds=[t_bounds, [block_r_edge, block_r_edge], [block_b_edge, block_t_edge]], 
@@ -710,14 +712,14 @@ if __name__ == "__main__":
   )
 
   bc_d_l = BC(
-    ct=200,
+    ct=100,
     truth_fn=bottom_boundary_true, 
     pred_fn=Tuv_prediction,
     axis_bounds=[t_bounds,[x_min, block_l_edge], [y_min, y_min]], 
     requires_grad=True,
   )
   bc_d_r = BC(
-    ct=200,
+    ct=100,
     truth_fn=bottom_boundary_true, 
     pred_fn=Tuv_prediction,
     axis_bounds=[t_bounds, [block_r_edge, x_max], [y_min, y_min]], 
@@ -725,21 +727,21 @@ if __name__ == "__main__":
   )
 
   collocation_a = BC(
-    ct=1000,
+    ct=850,
     truth_fn=true_collocation,
     pred_fn=predict_collocation,
     axis_bounds=[t_bounds, [x_min, block_l_edge], y_bounds], 
     requires_grad=True,
   )
   collocation_b = BC(
-    ct=1000,
+    ct=850,
     truth_fn=true_collocation,
     pred_fn=predict_collocation,
     axis_bounds=[t_bounds, [block_l_edge, block_r_edge],[block_t_edge, y_max]], 
     requires_grad=True,
   )
   collocation_c = BC(
-    ct=1000,
+    ct=850,
     truth_fn=true_collocation,
     pred_fn=predict_collocation,
     axis_bounds=[t_bounds, [block_r_edge, x_max], y_bounds], 
@@ -747,21 +749,21 @@ if __name__ == "__main__":
   )
 
   ic_a = BC(
-    ct=500,
+    ct=300,
     truth_fn=ic_true,
     pred_fn=Tuv_prediction,
     axis_bounds=[[t_bounds[0], t_bounds[0]], [x_min, block_l_edge], y_bounds], 
     requires_grad=True,
   )
   ic_b = BC(
-    ct=500,
+    ct=300,
     truth_fn=ic_true,
     pred_fn=Tuv_prediction,
     axis_bounds=[[t_bounds[0], t_bounds[0]], [block_l_edge, block_r_edge],[block_t_edge, y_max]], 
     requires_grad=True,
   )
   ic_c = BC(
-    ct=500,
+    ct=300,
     truth_fn=ic_true,
     pred_fn=Tuv_prediction,
     axis_bounds=[[t_bounds[0], t_bounds[0]], [block_r_edge, x_max], y_bounds], 
@@ -789,6 +791,7 @@ if __name__ == "__main__":
       Peclet=PECLET,
       Reynolds=REYNOLDS
   )
+  # pinn.plot_bcs_and_ics(ct=200)
 
   # fig = plt.figure()
   # for bc in pinn.BCs:
