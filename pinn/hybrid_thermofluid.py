@@ -24,12 +24,15 @@ class PINN_2D:
       net: MLP, 
       ics,
       bcs,
+      collocation_pts, 
       lr=1e-4, 
       collocation_ct=500, 
       t_bounds=[0,4], 
-      space_bounds=[-2*np.pi,2*np.pi],
+      space_bounds=[[-2*np.pi,2*np.pi], [-2*np.pi,2*np.pi]],
       adaptive_resample=False,
       soft_adapt_weights=False,
+      Rayleigh=1708,
+      Prandtl=0.71,
       Richardson=1,
       Peclet=0.1,
       Reynolds=100,
@@ -41,15 +44,14 @@ class PINN_2D:
         self.t_range = self.t_max - self.t_min
 
         self.space_bounds = space_bounds
-        self.x_min = self.space_bounds[0]
-        self.x_max = self.space_bounds[1]
+        self.x_min = self.space_bounds[0][0]
+        self.x_max = self.space_bounds[0][1]
         self.x_range = self.x_max - self.x_min
 
-        self.y_min = self.space_bounds[0]
-        self.y_max = self.space_bounds[1]
+        self.y_min = self.space_bounds[1][0]
+        self.y_max = self.space_bounds[1][1]
         self.y_range = self.y_max - self.y_min
 
-        self.collocation_ct = collocation_ct
         self.dim = 1 + 2
         
         self.loss_fn = nn.MSELoss()
@@ -64,10 +66,11 @@ class PINN_2D:
 
 
         self.adaptive_resample =  adaptive_resample
+        self.collocation_pts = collocation_pts
         self.BCs: List[BC] = bcs
         self.ICs: List[BC] = ics
 
-        for bc in self.BCs+self.ICs:
+        for bc in self.BCs+self.ICs+self.collocation_pts:
           bc.parent = self
         
         self.soft_adapt_weights = soft_adapt_weights
@@ -77,10 +80,16 @@ class PINN_2D:
         self.Peclet = Peclet #46 #0.1 # Diffusive Transport vs Advective Transport - Low means more diffusive
         self.Richardson = Richardson #0.1 # Buoyancy Strength
         self.Reynolds = Reynolds #100 # was 200! Turbulence
+        # self.Rayleigh = Rayleigh
+        # self.Prandtl = Prandtl
 
         self.it = 0
         self.best_pde_loss = 9999
     
+    def sample_col(self):
+      for col_pts in self.collocation_pts:
+        col_pts.sample(cache=True)
+
     def sample_bcs(self):
       for bc in self.BCs:
         bc.sample(cache=True)
@@ -89,6 +98,18 @@ class PINN_2D:
       for ic in self.ICs:
         ic.sample(cache=True)
     
+    def loss_physics(self):
+      preds = []
+      truths = []
+      for col in self.collocation_pts:
+        col_pred = col.predict(cache=True)
+        preds.append(col_pred)
+        truths.append(col.truth)
+        
+      pred = torch.vstack(preds)
+      truth = torch.vstack(truths)
+      return self.loss_fn(pred,truth)
+
     def loss_bc(self):
       preds = []
       truths = []
@@ -113,30 +134,30 @@ class PINN_2D:
       truth = torch.vstack(truths)
       return self.loss_fn(pred,truth)
     
-    def sample_collocation(self, adaptive_sample=False):
-        # torch.manual_seed(2)
-        if adaptive_sample:
-          initial_ct = self.collocation_ct*10
-          pts_rand = torch.rand((initial_ct, self.dim), device=device, requires_grad=True)
-          pts = torch.empty_like(pts_rand)
-          pts[:,0] = pts_rand[:,0] * self.t_range + self.t_min
-          pts[:,1] = pts_rand[:,1] * self.x_range + self.x_min
-          pts[:,2] = pts_rand[:,2] * self.y_range + self.y_min
-          results = self.governing_eq(pts)
-          r2 = results["r2"]
-          e_r2 = torch.mean(r2)
-          p_X = (r2 / e_r2) / torch.sum(r2 / e_r2)
-          pts_subsample_ix = torch.multinomial(p_X.flatten(), self.collocation_ct, replacement=True)
-          pts_subsample = pts[pts_subsample_ix]
+    # def sample_collocation(self, adaptive_sample=False):
+    #     # torch.manual_seed(2)
+    #     if adaptive_sample:
+    #       initial_ct = self.collocation_ct*10
+    #       pts_rand = torch.rand((initial_ct, self.dim), device=device, requires_grad=True)
+    #       pts = torch.empty_like(pts_rand)
+    #       pts[:,0] = pts_rand[:,0] * self.t_range + self.t_min
+    #       pts[:,1] = pts_rand[:,1] * self.x_range + self.x_min
+    #       pts[:,2] = pts_rand[:,2] * self.y_range + self.y_min
+    #       results = self.governing_eq(pts)
+    #       r2 = results["r2"]
+    #       e_r2 = torch.mean(r2)
+    #       p_X = (r2 / e_r2) / torch.sum(r2 / e_r2)
+    #       pts_subsample_ix = torch.multinomial(p_X.flatten(), self.collocation_ct, replacement=True)
+    #       pts_subsample = pts[pts_subsample_ix]
           
-          return pts_subsample
-        else:
-          pts_rand = torch.rand((self.collocation_ct, self.dim), device=device, requires_grad=True)
-          pts = torch.empty_like(pts_rand)
-          pts[:,0] = pts_rand[:,0] * self.t_range + self.t_min
-          pts[:,1] = pts_rand[:,1] * self.x_range + self.x_min
-          pts[:,2] = pts_rand[:,2] * self.y_range + self.y_min
-          return pts
+    #       return pts_subsample
+    #     else:
+    #       pts_rand = torch.rand((self.collocation_ct, self.dim), device=device, requires_grad=True)
+    #       pts = torch.empty_like(pts_rand)
+    #       pts[:,0] = pts_rand[:,0] * self.t_range + self.t_min
+    #       pts[:,1] = pts_rand[:,1] * self.x_range + self.x_min
+    #       pts[:,2] = pts_rand[:,2] * self.y_range + self.y_min
+    #       return pts
 
     def heat_flux(self, pts, T):
         """Partials"""
@@ -151,8 +172,12 @@ class PINN_2D:
         T_t = grad[:,0:1]
         T_x = grad[:,1:2]
         T_y = grad[:,2:3]
-        q_x = -self.Peclet*T_x
-        q_y = -self.Peclet*T_y
+        d = 1/self.Peclet
+        q_x = -d*T_x
+        q_y = -d*T_y
+        # d = 1 / np.sqrt(self.Rayleigh * self.Prandtl)
+        # q_x = -d*T_x
+        # q_y = -d*T_y
         return {"T": T, "T_t": T_t, "T_x": T_x, "T_y": T_y, "q_x": q_x, "q_y": q_y}
 
     def diffusion(self, pts, T_x, T_y):
@@ -173,30 +198,33 @@ class PINN_2D:
         )[0][:,2:3]
 
         diffusion = (T_xx + T_yy) * 1 / self.Peclet
+        # diffusion = (T_xx + T_yy) * 1 / np.sqrt(self.Rayleigh * self.Prandtl)
+        # diffusion = (T_xx + T_yy) 
         return {"diffusion": diffusion, "T_xx": T_xx, "T_yy": T_yy}
 
-    def advection(self, pts, T, u, v):
-        uT = u*T
-        vT = v*T
+    def advection(self, pts, T, T_x, T_y, u, v):
+        # uT = u*T
+        # vT = v*T
 
-        uT_x= torch.autograd.grad(
-            inputs=pts,
-            outputs=uT,
-            grad_outputs=torch.ones_like(uT).to(device),
-            create_graph=True,
-            retain_graph=True
-        )[0][:,1:2]
+        # uT_x= torch.autograd.grad(
+        #     inputs=pts,
+        #     outputs=uT,
+        #     grad_outputs=torch.ones_like(uT).to(device),
+        #     create_graph=True,
+        #     retain_graph=True
+        # )[0][:,1:2]
 
-        vT_y= torch.autograd.grad(
-            inputs=pts,
-            outputs=vT,
-            grad_outputs=torch.ones_like(vT).to(device),
-            create_graph=True,
-            retain_graph=True
-        )[0][:,2:3]
+        # vT_y= torch.autograd.grad(
+        #     inputs=pts,
+        #     outputs=vT,
+        #     grad_outputs=torch.ones_like(vT).to(device),
+        #     create_graph=True,
+        #     retain_graph=True
+        # )[0][:,2:3]
 
 
-        advection = uT_x + vT_y
+        # advection = uT_x + vT_y
+        advection = u*T_x + v*T_y
         return {"advection": advection}
     
     def pressure(self, pts, p):
@@ -314,16 +342,18 @@ class PINN_2D:
         diffusion = self.diffusion(pts, T_x, T_y)["diffusion"]
 
         """Advection"""
-        advection = self.advection(pts, T, u, v)["advection"]
+        advection = self.advection(pts, T, T_x, T_y, u, v)["advection"]
 
         """Momentum Derivatives"""
         momentum = self.momentum(pts, u, v)
         u_t = momentum["u_t"]
         u_x = momentum["u_x"]
+        u_y = momentum["u_y"]
         uu_x = momentum["uu_x"]
         u_xx = momentum["u_xx"]
         u_yy = momentum["u_yy"]
         v_t = momentum["v_t"]
+        v_x = momentum["v_x"]
         v_y = momentum["v_y"]
         vv_y = momentum["vv_y"]
         v_xx = momentum["v_xx"]
@@ -335,8 +365,18 @@ class PINN_2D:
         p_y = dp["p_y"]
 
         """Residuals"""
-        residual_ns_x = u_t + uu_x + p_x - 1/self.Reynolds * (u_xx+u_yy) #- self.Richardson * T
-        residual_ns_y = v_t + vv_y + p_y - 1/self.Reynolds * (v_xx+v_yy) - self.Richardson * T
+        # residual_ns_x = u_t + uu_x + p_x - 1/self.Reynolds * (u_xx+u_yy) 
+        # residual_ns_y = v_t + vv_y + p_y - 1/self.Reynolds * (v_xx+v_yy) - self.Richardson * T
+
+        residual_ns_x = u_t + uu_x + v*u_y + p_x - 1/self.Reynolds * (u_xx+u_yy) 
+        residual_ns_y = v_t + u*v_x + vv_y + p_y - 1/self.Reynolds * (v_xx+v_yy) - self.Richardson * T
+
+        # residual_ns_x = u_t + uu_x + p_x - np.sqrt(self.Prandtl/self.Rayleigh)* (u_xx+u_yy) 
+        # residual_ns_y = v_t + vv_y + p_y - np.sqrt(self.Prandtl/self.Rayleigh)* (v_xx+v_yy)  - T
+
+        # residual_ns_x = u_t + uu_x + v*u_y + p_x - np.sqrt(self.Prandtl/self.Rayleigh)* (u_xx+u_yy) 
+        # residual_ns_y = v_t + u*v_x + vv_y + p_y - np.sqrt(self.Prandtl/self.Rayleigh)* (v_xx+v_yy)  - T
+
         r2_ns_x = residual_ns_x**2
         r2_ns_y = residual_ns_y**2
 
@@ -347,14 +387,14 @@ class PINN_2D:
         r2_heat = residual_diffusion**2 
         
         r2 = r2_ns_x + r2_ns_y + r2_continuity + r2_heat
-        # r2 = r2_heat
 
         return {"T": T, "u": u, "v": v, "p":p, "r2": r2}
 
     def train_step(self):
 
         """Sample pts"""
-        pts_col = self.sample_collocation(adaptive_sample=self.adaptive_resample)
+        # pts_col = self.sample_collocation(adaptive_sample=self.adaptive_resample)
+        self.sample_col()
         self.sample_bcs()
         self.sample_ics()
 
@@ -364,13 +404,14 @@ class PINN_2D:
         """Boundaries"""
         loss_bc = self.loss_bc()
         loss_ic = self.loss_ic()
+        loss_physics = self.loss_physics()
 
 
         """Collocation pts"""
-        summary = self.governing_eq(pts_col)
-        r2 = summary["r2"]
-        loss_physics = torch.mean(r2)
-        loss_physics_res_penalty = torch.max(r2)
+        # summary = self.governing_eq(pts_col)
+        # r2 = summary["r2"]
+        # loss_physics = torch.mean(r2)
+        # loss_physics_res_penalty = torch.max(r2)
 
         """Loss"""
 
@@ -383,10 +424,10 @@ class PINN_2D:
           loss = torch.sum(lambdas * torch.hstack([loss_ic, loss_bc, loss_physics ]))
           loss.backward()
         else:
-          loss = self.ic_weight*loss_ic + self.bc_weight*loss_bc + self.res_weight*loss_physics_res_penalty + self.phys_weight*loss_physics 
+          loss = self.ic_weight*loss_ic + self.bc_weight*loss_bc + self.phys_weight*loss_physics 
           loss.backward()
         if self.it % 100 == 0:
-          weighted_loss = self.ic_weight*loss_ic + self.bc_weight*loss_bc + self.res_weight*loss_physics_res_penalty + self.phys_weight*loss_physics 
+          weighted_loss = self.ic_weight*loss_ic + self.bc_weight*loss_bc + self.phys_weight*loss_physics 
           print("\nIC / BC / PDE", loss_ic.item(), loss_bc.item(), loss_physics.item())
           if self.best_pde_loss > loss_bc.item():
             torch.save(self.net.state_dict(), model_path)
@@ -427,58 +468,7 @@ class PINN_2D:
         zaxis_showbackground=False,
       )
       fig.show()
-  
     
-    def plot_3d(self,res=200, t=0):
-      with torch.no_grad():
-        fig = go.Figure()
-        t = torch.ones((res*res,1),device=device)*t
-        x = torch.linspace(*self.space_bounds,res).to(device)
-        y = torch.linspace(*self.space_bounds,res).to(device)
-        xx, yy = torch.meshgrid(x,y, indexing="xy")
-
-        X = torch.stack([xx,yy]).T.reshape(-1,2)
-        pts = torch.hstack([t,X])
-        z = self.net(pts).reshape(res,res).cpu()
-        scatter_plot = go.Surface(
-          x=xx.cpu(),
-          y=yy.cpu(),
-          z=z.T,
-        )
-        fig.add_trace(scatter_plot)
-        # scatter = go.Scatter3d(
-        #   x=X[:,0].cpu(),
-        #   y=X[:,1].cpu(),
-        #   z=z.flatten().cpu(),
-        #   mode="markers",
-        #   marker=dict(
-        #     size=1.5,
-        #     color=z.flatten().cpu(),
-        #     colorscale="plasma"
-        #   )
-        # )
-        # fig.add_trace(scatter)
-        fig.update_layout(
-          coloraxis=dict(colorscale='plasma'), 
-          showlegend=False,
-        )
-
-        fig.update_scenes(
-          xaxis_title_text='x [s]',  
-          yaxis_title_text='y [m]',  
-          zaxis_title_text='T [deg C]',
-          xaxis_showbackground=False,
-          yaxis_showbackground=False,
-          zaxis_showbackground=False,
-        )
-        fig.show()
-    
-    def plot_frames(self,res=200,n=5):
-      t = torch.linspace(*self.t_bounds,n).to(device)
-      with torch.no_grad():
-        for i in range(n):
-          self.plot_3d(res,t[i])
-
 class BC:
   def __init__(self, 
     truth_fn, 
@@ -558,25 +548,94 @@ class BC:
 def get_d(pts):
   return torch.sqrt(torch.sum(pts[:,1:]**2, axis=1)).reshape(-1,1)
 
+t_bounds = [0, 20]
+s_bounds = [[-2,7], [0,3]]
 if __name__ == "__main__":
 
   model_path = Path(os.path.abspath(os.path.dirname(__file__))) / "models" / "new-bc-method.pth"
   ADAPTIVE_SAMPLING = False
   ADAPTIVE_WEIGHTING = True
-  RICHARDSON=1.0
-  PECLET=15
-  REYNOLDS=200
-  # PRANDTL = 0.71 # air
-  t_bounds = [0, 8*np.pi]
-  s_bounds = [-4*np.pi, 4*np.pi]
 
-  def leftright_boundary_true(pinn: PINN_2D, pts):
-    q_x = pts[:,1:2]*0 # no heat flux
-    u = pts[:,1:2]*0 # no penetration
+  RICHARDSON=0.0
+  PECLET=36
+  REYNOLDS=50
+
+  PRANDTL = 4.3 
+  RAYLEIGH = 1000000
+
+  x_bounds = s_bounds[0]
+  y_bounds = s_bounds[1]
+  x_min = x_bounds[0]
+  x_max = x_bounds[1]
+  y_min = y_bounds[0]
+  y_max = y_bounds[1]
+  x_range = x_max - x_min
+  y_range = y_max - y_min
+
+
+  block_l_edge = x_min + x_range/4
+  block_r_edge = block_l_edge + x_range/4
+  block_b_edge = y_min
+  block_t_edge = y_min + y_range/3
+
+  def heated_edge(pinn: PINN_2D, pts):
+    T = pts[:,1:2]*0 + 1 
+    u = pts[:,2:3]*0
+    v = pts[:,2:3]*0
+    return torch.vstack([ T, u, v ])
+
+
+  def left_boundary_true(pinn: PINN_2D, pts):
+    T = pts[:,1:2]*0 # no heat flux
+    u = pts[:,1:2]*0 + 1 # rightward flow
     v = pts[:,1:2]*0 # no slip
-    return torch.vstack([ q_x, u, v ])
+    return torch.vstack([ T, u, v ])
 
-  def leftright_boundary_pred(pinn: PINN_2D, pts):
+  def right_boundary_true(pinn: PINN_2D, pts):
+    q_x = pts[:,1:2]*0 # no heat flux
+    p = pts[:,1:2]*0 # zero pressure
+    return torch.vstack([ q_x, p ])
+
+  def bottom_boundary_true(pinn: PINN_2D, pts):
+    T = pts[:,1:2]*0
+    u = pts[:,2:3]*0
+    v = pts[:,2:3]*0
+    return torch.vstack([ T, u, v ])
+
+  def top_boundary_true(pinn: PINN_2D, pts):
+    T = pts[:,2:3]*0
+    u = pts[:,2:3]*0 # no slip
+    v = pts[:,2:3]*0 # no penetration
+    # T = -torch.sign(pts[:,2:3])*0.5
+    # q_y = pts[:,2:3]*0 + 1 # cooled/heated plate
+    # return torch.vstack([q_y, u, v])
+    return torch.vstack([T, u, v])
+
+  def ic_true(pinn: PINN_2D, pts):
+    # T = pts[:,1:2]*0#torch.sqrt(pts[:,1:2]**2 + pts[:,2:3]**2)
+    # T = 2*((pts[:,2:3]-pinn.y_min)/pinn.y_range * 2 -1)#torch.sqrt(pts[:,1:2]**2 + pts[:,2:3]**2)
+    # T = -0.5*((pts[:,2:3]-pinn.y_min)/pinn.y_range * 2 -1)
+    # T = -1*((pts[:,2:3]-pinn.y_min)/pinn.y_range * 2 -1)
+    T = pts[:,2:3]*0 
+    u = pts[:,1:2]*0 
+    v = pts[:,1:2]*0
+    # v = torch.abs(pinn.x_max - torch.abs(pts[:,2:3]))/(pinn.x_range/2)
+    # gaussian_sigma = 8
+    # gaussian_height = 30
+    # T = gaussian_height*(1/(gaussian_sigma*np.sqrt(2*np.pi)))*torch.exp(-(get_d(pts)**2) / (2*gaussian_sigma**2))
+    return torch.vstack([T, u, v])
+
+  def true_collocation(pinn: PINN_2D, pts):
+    return pts[:,1:2]*0 # always 0
+
+  def Tuv_prediction(pinn: PINN_2D, pts):
+    R = pinn.net(pts)
+    T = R[:,0:1]
+    u = R[:,1:2] 
+    v = R[:,2:3]
+    return torch.vstack([T, u, v])
+  
+  def qxuv_prediction(pinn: PINN_2D, pts):
     R = pinn.net(pts)
     T = R[:,0:1]
     u = R[:,1:2]
@@ -585,15 +644,15 @@ if __name__ == "__main__":
     q_x = fluxes["q_x"]
     return torch.vstack([ q_x, u, v ])
 
-  def updown_boundary_true(pinn: PINN_2D, pts):
-    q_y = pts[:,2:3]*0 + 15 # cooled/heated plate
-    u = pts[:,2:3]*0 # no slip
-    v = pts[:,2:3]*0 # no penetration
-    return torch.vstack([q_y, u, v])
-    # T = -torch.sign(pts[:,2:3])*2
-    # return torch.vstack([T, u, v])
-  
-  def updown_boundary_pred(pinn: PINN_2D, pts):
+  def qxp_prediction(pinn: PINN_2D, pts):
+    R = pinn.net(pts)
+    T = R[:,0:1]
+    p = R[:,3:4]
+    fluxes = pinn.heat_flux(pts, T)
+    q_x = fluxes["q_x"]
+    return torch.vstack([ q_x, p ])
+
+  def qyuv_prediction(pinn: PINN_2D, pts):
     R = pinn.net(pts)
     T = R[:,0:1]
     u = R[:,1:2]
@@ -601,92 +660,141 @@ if __name__ == "__main__":
     fluxes = pinn.heat_flux(pts, T)
     q_y = fluxes["q_y"]
     return torch.vstack([q_y, u, v])
-    # return torch.vstack([T, u, v])
 
-  bc_d_fn = updown_boundary_true
-  bc_u_fn = updown_boundary_true
-  bc_l_fn = leftright_boundary_true
-  bc_r_fn = leftright_boundary_true
+  def predict_collocation(pinn: PINN_2D, pts):
+    summary = pinn.governing_eq(pts)
+    r2 = summary["r2"]
+    return r2
 
-  bc_d_pred_fn = updown_boundary_pred
-  bc_u_pred_fn = updown_boundary_pred
-  bc_l_pred_fn = leftright_boundary_pred
-  bc_r_pred_fn = leftright_boundary_pred
-
-
-  def ic_true(pinn: PINN_2D, pts):
-    # T = pts[:,1:2]*0#torch.sqrt(pts[:,1:2]**2 + pts[:,2:3]**2)
-    # T = 2*((pts[:,2:3]-pinn.y_min)/pinn.y_range * 2 -1)#torch.sqrt(pts[:,1:2]**2 + pts[:,2:3]**2)
-    T = pts[:,1:2]*0
-    u = pts[:,1:2]*0
-    v = pts[:,1:2]*0
-    # v = torch.abs(pinn.x_max - torch.abs(pts[:,2:3]))/(pinn.x_range/2)
-    gaussian_sigma = 4
-    gaussian_height = 12
-    T = gaussian_height*(1/(gaussian_sigma*np.sqrt(2*np.pi)))*torch.exp(-(get_d(pts)**2) / (2*gaussian_sigma**2))
-    return torch.vstack([T, u, v])
-  
-  def ic_pred(pinn: PINN_2D, pts):
-    R = pinn.net(pts)
-    T = R[:,0:1]
-    u = R[:,1:2] 
-    v = R[:,2:3]
-    return torch.vstack([T, u, v])
-  ic_fn = ic_true
-  ic_pred_fn = ic_pred
-
-  bc_d = BC(
-    ct=1250,
-    truth_fn=bc_d_fn, 
-    pred_fn=bc_d_pred_fn,
-    axis_bounds=[t_bounds, s_bounds, [s_bounds[0], s_bounds[0]]], 
-    requires_grad=True,
-  )
   bc_u = BC(
-    ct=1250,
-    truth_fn=bc_u_fn, 
-    pred_fn=bc_u_pred_fn,
-    axis_bounds=[t_bounds, s_bounds, [s_bounds[1], s_bounds[1]]], 
+    ct=200,
+    truth_fn=top_boundary_true, 
+    pred_fn=Tuv_prediction,
+    axis_bounds=[t_bounds, x_bounds, [y_max, y_max]], 
     requires_grad=True,
   )
   bc_l = BC(
-    ct=1250,
-    truth_fn=bc_l_fn,
-    pred_fn=bc_l_pred_fn,
-    axis_bounds=[t_bounds, [s_bounds[0], s_bounds[0]], s_bounds], 
+    ct=200,
+    truth_fn=left_boundary_true,
+    pred_fn=Tuv_prediction,
+    axis_bounds=[t_bounds, [x_min, x_min], y_bounds], 
     requires_grad=True,
   )
   bc_r = BC(
-    ct=1250,
-    truth_fn=bc_r_fn,
-    pred_fn=bc_r_pred_fn,
-    axis_bounds=[t_bounds, [s_bounds[1], s_bounds[1]], s_bounds], 
+    ct=200,
+    truth_fn=right_boundary_true,
+    pred_fn=qxp_prediction,
+    axis_bounds=[t_bounds, [x_max, x_max], y_bounds], 
     requires_grad=True,
   )
-  ic = BC(
-    ct=1000,
-    truth_fn=ic_fn,
-    pred_fn=ic_pred_fn,
-    axis_bounds=[[t_bounds[0], t_bounds[0]], s_bounds, s_bounds], 
-    requires_grad=False,
+  box_boundary_t = BC(
+    ct=200,
+    truth_fn=heated_edge,
+    pred_fn=Tuv_prediction,
+    axis_bounds=[t_bounds, [block_l_edge, block_r_edge], [block_t_edge, block_t_edge]], 
+    requires_grad=True,
   )
-  bcs = [bc_d, bc_u, bc_l, bc_r]
-  ics = [ic]
+  box_boundary_l= BC(
+    ct=200,
+    truth_fn=heated_edge,
+    pred_fn=Tuv_prediction,
+    axis_bounds=[t_bounds, [block_l_edge, block_l_edge], [block_b_edge, block_t_edge]], 
+    requires_grad=True,
+  )
+  box_boundary_r= BC(
+    ct=200,
+    truth_fn=heated_edge,
+    pred_fn=Tuv_prediction,
+    axis_bounds=[t_bounds, [block_r_edge, block_r_edge], [block_b_edge, block_t_edge]], 
+    requires_grad=True,
+  )
+
+  bc_d_l = BC(
+    ct=200,
+    truth_fn=bottom_boundary_true, 
+    pred_fn=Tuv_prediction,
+    axis_bounds=[t_bounds,[x_min, block_l_edge], [y_min, y_min]], 
+    requires_grad=True,
+  )
+  bc_d_r = BC(
+    ct=200,
+    truth_fn=bottom_boundary_true, 
+    pred_fn=Tuv_prediction,
+    axis_bounds=[t_bounds, [block_r_edge, x_max], [y_min, y_min]], 
+    requires_grad=True,
+  )
+
+  collocation_a = BC(
+    ct=1000,
+    truth_fn=true_collocation,
+    pred_fn=predict_collocation,
+    axis_bounds=[t_bounds, [x_min, block_l_edge], y_bounds], 
+    requires_grad=True,
+  )
+  collocation_b = BC(
+    ct=1000,
+    truth_fn=true_collocation,
+    pred_fn=predict_collocation,
+    axis_bounds=[t_bounds, [block_l_edge, block_r_edge],[block_t_edge, y_max]], 
+    requires_grad=True,
+  )
+  collocation_c = BC(
+    ct=1000,
+    truth_fn=true_collocation,
+    pred_fn=predict_collocation,
+    axis_bounds=[t_bounds, [block_r_edge, x_max], y_bounds], 
+    requires_grad=True,
+  )
+
+  ic_a = BC(
+    ct=500,
+    truth_fn=ic_true,
+    pred_fn=Tuv_prediction,
+    axis_bounds=[[t_bounds[0], t_bounds[0]], [x_min, block_l_edge], y_bounds], 
+    requires_grad=True,
+  )
+  ic_b = BC(
+    ct=500,
+    truth_fn=ic_true,
+    pred_fn=Tuv_prediction,
+    axis_bounds=[[t_bounds[0], t_bounds[0]], [block_l_edge, block_r_edge],[block_t_edge, y_max]], 
+    requires_grad=True,
+  )
+  ic_c = BC(
+    ct=500,
+    truth_fn=ic_true,
+    pred_fn=Tuv_prediction,
+    axis_bounds=[[t_bounds[0], t_bounds[0]], [block_r_edge, x_max], y_bounds], 
+    requires_grad=True,
+  )
+
+
+  bcs = [bc_d_l, bc_d_r, bc_u, bc_l, bc_r, box_boundary_l, box_boundary_r, box_boundary_t]
+  ics = [ic_a,ic_b,ic_c]
+  collocation_pts = [collocation_a, collocation_b, collocation_c]
 
   pinn = PINN_2D(
-      net=MLP(input_dim=3, output_dim=4, hidden_layer_ct=10,hidden_dim=256, act=F.tanh, learnable_act="SINGLE"), 
+      net=MLP(input_dim=3, output_dim=4, hidden_layer_ct=4,hidden_dim=256, act=F.tanh, learnable_act="SINGLE"), 
       bcs=bcs,
       ics=ics,
-      collocation_ct=5000, 
+      collocation_pts=collocation_pts,
       t_bounds=t_bounds, 
       space_bounds=s_bounds,
       lr=1e-3,
       adaptive_resample=ADAPTIVE_SAMPLING,
       soft_adapt_weights=ADAPTIVE_WEIGHTING,
+      Rayleigh=RAYLEIGH,
+      Prandtl=PRANDTL,
       Richardson=RICHARDSON,
       Peclet=PECLET,
       Reynolds=REYNOLDS
   )
+
+  # fig = plt.figure()
+  # for bc in pinn.BCs:
+  #   pts = bc.sample(ct=500)["pts"].detach().cpu()
+  #   plt.scatter(pts[:,1:2],pts[:,2:3],s=0.5)
+  # plt.show()
 
   # pinn.plot_bcs_and_ics("Truth", 2000)
 
@@ -703,4 +811,3 @@ if __name__ == "__main__":
     if i == 4:
         pinn.adam.param_groups[0]["lr"] = 5e-6
     pinn.train(n_epochs=1000, reporting_frequency=100, phys_weight=1, res_weight=0.01, bc_weight=8, ic_weight=4)
-    torch.save(pinn.net.state_dict(), model_path)
