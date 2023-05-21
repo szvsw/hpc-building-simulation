@@ -158,6 +158,7 @@ if __name__ == "__main__":
 
     model_path =  "2d-simple-neumann2d-5-heated-with-wind-adaptive.pth"
     model_path =  "last_runs.pth"
+    model_path =  "a100_runs.pth"
     OUTPUT_DIM=1
     USE_MESH = False
     dt = 0.02

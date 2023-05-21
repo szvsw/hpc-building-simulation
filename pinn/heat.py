@@ -792,7 +792,7 @@ def get_d(pts):
 
 if __name__ == "__main__":
 
-  model_path = Path(os.path.abspath(os.path.dirname(__file__))) / "models" / "last_runs.pth"
+  model_path = Path(os.path.abspath(os.path.dirname(__file__))) / "models" / "a100_runs.pth"
   ADAPTIVE_SAMPLING = True
   ADAPTIVE_WEIGHTING = True
   t_bounds = [0, 16*np.pi]
