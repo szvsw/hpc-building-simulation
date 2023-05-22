@@ -590,8 +590,8 @@ class BCCicle(BC):
 def get_d(pts):
   return torch.sqrt(torch.sum(pts[:,1:]**2, axis=1)).reshape(-1,1)
 
-t_bounds = [0, 100]
-s_bounds = [[-3, 9], [-2,2]]
+t_bounds = [0, 200]
+s_bounds = [[-8, 24], [-8,8]]
 if __name__ == "__main__":
 
   model_path = Path(os.path.abspath(os.path.dirname(__file__))) / "models" / "a100-fluid-method.pth"
@@ -601,9 +601,9 @@ if __name__ == "__main__":
   # RICHARDSON=1.0
   # PECLET=20
   # REYNOLDS=1000
-  RICHARDSON=0
+  RICHARDSON=0.9
   PECLET=50
-  REYNOLDS=300
+  REYNOLDS=200
 
   PRANDTL = 4.3 
   RAYLEIGH = 1000000
@@ -659,6 +659,12 @@ if __name__ == "__main__":
 
   def hot_ramped_edge_true(pinn: PINN_2D, pts):
     T =  torch.sigmoid(pts[:,0:1]-6)
+    u = pts[:,2:3]*0
+    v = pts[:,2:3]*0
+    return torch.vstack([ T, u, v ])
+
+  def cold_ramped_edge_true(pinn: PINN_2D, pts):
+    T =  torch.sigmoid(pts[:,0:1]-6)*-1
     u = pts[:,2:3]*0
     v = pts[:,2:3]*0
     return torch.vstack([ T, u, v ])
@@ -814,7 +820,7 @@ if __name__ == "__main__":
     r=0.5
     c=[0,0]
     bc_cyl = BCCicle(
-      ct=1000,
+      ct=4000,
       truth_fn=hot_ramped_edge_true,
       pred_fn=Tuv_prediction,
       axis_bounds=[t_bounds, x_bounds, y_bounds], 
@@ -824,7 +830,7 @@ if __name__ == "__main__":
       c=c
     )
     col = BCCicle(
-      ct=8000,
+      ct=10000,
       truth_fn=true_collocation,
       pred_fn=predict_collocation,
       axis_bounds=[t_bounds, x_bounds, y_bounds], 
@@ -833,8 +839,18 @@ if __name__ == "__main__":
       r=r,
       c=c
     )
+    col_inflow = BCCicle(
+      ct=10000,
+      truth_fn=true_collocation,
+      pred_fn=predict_collocation,
+      axis_bounds=[t_bounds, [x_min,x_min+x_range*0.25], y_bounds], 
+      requires_grad=True,
+      mode="mask",
+      r=r,
+      c=c
+    )
     ic = BCCicle(
-      ct=4000,
+      ct=8000,
       truth_fn=zero_Tuv_true,
       pred_fn=Tuv_prediction,
       # truth_fn=zero_Tuv_true,
@@ -847,7 +863,7 @@ if __name__ == "__main__":
     )
     ics = [ic]
     bcs = [bc_inlet, bc_outlet, bc_u, bc_d, bc_cyl]
-    col = [col]
+    col = [col, col_inflow]
     return ics, bcs, col
 
   def make_heated_box():
@@ -983,28 +999,28 @@ if __name__ == "__main__":
 
   def make_rbc():
     bc_d = BC(
-      ct=500,
-      truth_fn=no_v_hot_edge, 
-      pred_fn=Tv_prediction,
+      ct=2000,
+      truth_fn=hot_ramped_edge_true, 
+      pred_fn=Tuv_prediction,
       axis_bounds=[t_bounds, x_bounds, [y_min, y_min]], 
       requires_grad=True,
     )
     bc_u = BC(
-      ct=500,
-      truth_fn=no_v_cold_edge, 
-      pred_fn=Tv_prediction,
+      ct=2000,
+      truth_fn=cold_ramped_edge_true, 
+      pred_fn=Tuv_prediction,
       axis_bounds=[t_bounds, x_bounds, [y_max, y_max]], 
       requires_grad=True,
     )
     bc_l = BC(
-      ct=500,
+      ct=2000,
       truth_fn=no_u_no_qx_edge, 
       pred_fn=qxu_prediction,
       axis_bounds=[t_bounds,[x_min,x_min], y_bounds], 
       requires_grad=True,
     )
     bc_r = BC(
-      ct=500,
+      ct=2000,
       truth_fn=no_u_no_qx_edge, 
       pred_fn=qxu_prediction,
       axis_bounds=[t_bounds,[x_max, x_max], y_bounds], 
@@ -1013,7 +1029,7 @@ if __name__ == "__main__":
 
     ic = BC(
       ct=2000,
-      truth_fn=ic_true,
+      truth_fn=zero_Tuv_true,
       pred_fn=Tuv_prediction,
       axis_bounds=[[t_bounds[0], t_bounds[0]], x_bounds, y_bounds], 
       requires_grad=True,
@@ -1032,7 +1048,8 @@ if __name__ == "__main__":
     collocation_pts=[collocation]
     return ics, bcs, collocation_pts
   
-  ics, bcs, collocation_pts = make_vk_cyl()
+  # ics, bcs, collocation_pts = make_vk_cyl()
+  ics, bcs, collocation_pts = make_rbc()
 
   pinn = PINN_2D(
       net=MLP(input_dim=3, output_dim=4, hidden_layer_ct=4,hidden_dim=256, act=F.tanh, learnable_act="SINGLE"), 
@@ -1050,6 +1067,7 @@ if __name__ == "__main__":
       Peclet=PECLET,
       Reynolds=REYNOLDS
   )
+  # pinn.net.load_state_dict(torch.load("./models/cyl-in-flow-re300-pec50-ri0-chckpoint"))
   # pinn.plot_bcs_and_ics(ct=200)
 
   fig = plt.figure()
@@ -1074,13 +1092,14 @@ if __name__ == "__main__":
         pinn.adam.param_groups[0]["lr"] = 1e-4
     if i == 2:
         pinn.adam.param_groups[0]["lr"] = 5e-5
-    if i == 3:
-        pinn.adam.param_groups[0]["lr"] = 1e-5
     if i == 4:
+        pinn.adam.param_groups[0]["lr"] = 1e-5
+    if i == 6:
         pinn.adam.param_groups[0]["lr"] = 5e-6
-    pinn.plot_bcs_and_ics(mode='error', ct=5000)
-    fig = go.Figure()
-    pinn.collocation_pts[0].add_error_to_fig(fig, 5000)
-    fig.show()
+    if i % 2 == 0:
+      pinn.plot_bcs_and_ics(mode='error', ct=5000)
+      fig = go.Figure()
+      pinn.collocation_pts[0].add_error_to_fig(fig, 5000)
+      fig.show()
     pinn.train(n_epochs=1000, reporting_frequency=100, phys_weight=1, res_weight=0.01, bc_weight=8, ic_weight=4)
     # pinn.plot_bcs_and_ics(mode='error', ct=5000)

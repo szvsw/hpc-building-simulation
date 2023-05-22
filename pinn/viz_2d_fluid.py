@@ -163,13 +163,13 @@ def update_colors(
         #         colors[ii*X_RES+i,jj*Y_RES+j].y = 0.0
         #         colors[ii*X_RES+i,jj*Y_RES+j].z = 0.0
 
-        x = 12*i / (X_RES-1)
-        y = 4*j / (Y_RES-1)
-        if (x-3)**2 + (y-2)**2 < 0.5**2:
-            for ii,jj in ti.ndrange(2,4):
-                colors[ii*X_RES+i,jj*Y_RES+j].x = 0.0
-                colors[ii*X_RES+i,jj*Y_RES+j].y = 0.0
-                colors[ii*X_RES+i,jj*Y_RES+j].z = 0.0
+        # x = 24*i / (X_RES-1)
+        # y = 8*j / (Y_RES-1)
+        # if (x-6)**2 + (y-4)**2 < 0.5**2:
+        #     for ii,jj in ti.ndrange(2,4):
+        #         colors[ii*X_RES+i,jj*Y_RES+j].x = 0.0
+        #         colors[ii*X_RES+i,jj*Y_RES+j].y = 0.0
+        #         colors[ii*X_RES+i,jj*Y_RES+j].z = 0.0
 
 colormap = [
     [64,57,144],
@@ -190,38 +190,39 @@ if __name__ == "__main__":
     model_path =  "new-bc-method.pth"
     # model_path =  "heated_blocks_in_enclosure_4x256.pth"
     model_path =  "a100-fluid-method.pth"
+    # model_path =  "200t-very-large-re200-pe50-i0-domain-8t024--8to8-.pth"
     OUTPUT_DIM=4
     dt = 0.05
 
     # rbc 
-    T_min, T_range = -0.25,0.5 # Tmp UL
-    qx_min, qx_range = -0.1,0.2 # 
-    qy_min, qy_range = -2.5,5 # 
-    q_min, q_range = 0,2.5 # 
-    V_min, V_range = -0.95,0.1 # Vort UR
+    T_min, T_range = -1,2 # Tmp UL
+    qx_min, qx_range = -0.03,0.06 # 
+    qy_min, qy_range = -0.2,0.4 # 
+    q_min, q_range = 0,1 # 
+    V_min, V_range = -0.1,0.2 # Vort UR
     u_min, u_range = -0.1,0.2 # 
     v_min, v_range = -0.1,0.2# 
-    vel_min, vel_range = 0,0.4 #
+    vel_min, vel_range = 0,0.2 #
 
     # heated block
-    T_min, T_range   = 0,0.5 # Tmp UL
-    qx_min, qx_range = -0.5,1 # 
-    qy_min, qy_range = -0.5,1 # 
-    q_min, q_range   = 0,1.0 #
-    V_min, V_range   = -0.1,0.2# Vort UR
-    u_min, u_range   = -0.1,0.2 # 
-    v_min, v_range   = -0.1,0.2# 
-    vel_min, vel_range = 0,1 #
+    # T_min, T_range   = 0,1.5 # Tmp UL
+    # qx_min, qx_range = -0.25,0.5 # 
+    # qy_min, qy_range = -0.2,0.4 # 
+    # q_min, q_range   = 0,0.25 #
+    # V_min, V_range   = -0.15,0.3# Vort UR
+    # u_min, u_range   = -1,1 # 
+    # v_min, v_range   = -0.03,0.03# 
+    # vel_min, vel_range = 0,1 #
 
     # vk vortex st
-    T_min, T_range   = 0,1 # Tmp UL
-    qx_min, qx_range = -0.5,1.0 # 
-    qy_min, qy_range = -0.5,1.0 # 
-    q_min, q_range   = 0,0.5 #
-    V_min, V_range   = -0.5,1# Vort UR
-    u_min, u_range   = 0,1.0 # 
-    v_min, v_range   = -0.1,0.2 # 
-    vel_min, vel_range = 0,1 #
+    # T_min, T_range   = 0,1 # Tmp UL
+    # qx_min, qx_range = -0.2,0.4 # 
+    # qy_min, qy_range = -0.2,0.4 # 
+    # q_min, q_range   = 0,0.3 #
+    # V_min, V_range   = -0.25,0.5# Vort UR
+    # u_min, u_range   = 0,1.0 # 
+    # v_min, v_range   = -0.05,0.1 # 
+    # vel_min, vel_range = 0,1 #
 
     """Computed"""
     x_bounds = s_bounds[0]
