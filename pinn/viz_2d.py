@@ -155,19 +155,41 @@ jet = plt.colormaps["jet"]
 colormap = jet(np.arange(jet.N))*255
 
 if __name__ == "__main__":
+    import sys
 
-    model_path =  "2d-simple-neumann2d-5-heated-with-wind-adaptive.pth"
-    model_path =  "last_runs.pth"
-    model_path =  "a100_runs.pth"
+    try:
+        model_path = sys.argv[1]
+    except:
+        model_path =  "2d-simple-neumann2d-5-heated-with-wind-adaptive.pth"
+        model_path =  "last_runs.pth"
+        model_path =  "a100_runs.pth"
+    
     OUTPUT_DIM=1
-    USE_MESH = False
-    dt = 0.02
-    t_bounds = [0, 16*np.pi]
+    try:
+        USE_MESH = bool(sys.argv[2])
+    except:
+        USE_MESH = False
+    dt = 0.005
+    t_bounds = [0, 8*np.pi]
     s_bounds = [-4*np.pi, 4*np.pi]
+
+    # BARS
     T_min, T_range = -5.5, 11   # LL
     q_min, q_range = 0, 0.8 # LR
     qx_min, qx_range = -0.2, 0.4 # UL
     qy_min, qy_range = 0, 0.9 #UR
+
+    # PLATEAUS
+    T_min, T_range = -2, 4   # LL
+    q_min, q_range = 0, 0.3 # LR
+    qx_min, qx_range = -0.1, 0.2 # UL
+    qy_min, qy_range = 0, 0.3 #UR
+
+    # PLATEAUS
+    T_min, T_range = 0, 1   # LL
+    q_min, q_range = 0, 0.2 # LR
+    qx_min, qx_range = -0.2, 0.4 # UL
+    qy_min, qy_range = -0.1, 0.2 #UR
 
     mesh_height = 2.0
 
@@ -265,7 +287,7 @@ if __name__ == "__main__":
             canvas.set_image(colors)
 
         window.show()
-        if (it + 1) % t_steps.shape[0] == 0:
-            exit()
-        window.save_image(f"pinn/videos/{it:05d}.png")
+        # if (it + 1) % t_steps.shape[0] == 0:
+        #     exit()
+        # window.save_image(f"pinn/videos/{it:05d}.png")
         it = (it + 1) % t_steps.shape[0]

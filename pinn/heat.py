@@ -330,6 +330,7 @@ class PINN_2D:
       lr=1e-4, 
       collocation_ct=500, 
       t_bounds=[0,4], 
+      v = [0,0],
       space_bounds=[-2*np.pi,2*np.pi],
       d_fn=lambda pts: pts[:,1:2]*0 + 5,
       adaptive_resample=False,
@@ -366,6 +367,7 @@ class PINN_2D:
         self.res_weight = 0.05
 
         self.d_fn = d_fn
+        self.v = v
 
         self.adaptive_resample =  adaptive_resample
         self.BCs: List[BC] = bcs
@@ -503,8 +505,8 @@ class PINN_2D:
         """Advection"""
         v = torch.ones_like(torch.hstack([T,T]))
         # vy = (torch.sigmoid((pts[:,1:2] + 1.05*np.pi)*6) + torch.sigmoid((-pts[:,1:2] + 1.05*np.pi)*6))-1
-        v[:,0] = 0
-        v[:,1] = 0
+        v[:,0] = self.v[0]
+        v[:,1] = self.v[1]
         # v[:,1:2] = 2
         vT = v*T
         vxT = vT[:,0:1]
@@ -598,8 +600,11 @@ class PINN_2D:
         if self.it % 100 == 0:
           print("\nIC / BC / PDE", loss_ic.item(), loss_bc.item(), loss_physics.item())
           if loss < self.best_loss:
-            self.best_loss = loss
-            torch.save(self.net.state_dict(), model_path)
+            # self.best_loss = loss
+            try:
+              torch.save(self.net.state_dict(), model_path)
+            except:
+              pass
         self.it = self.it + 1
         return loss
     
