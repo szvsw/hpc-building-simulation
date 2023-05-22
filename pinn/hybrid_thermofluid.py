@@ -178,6 +178,9 @@ class PINN_2D:
         # d = 1 / np.sqrt(self.Rayleigh * self.Prandtl)
         # q_x = -d*T_x
         # q_y = -d*T_y
+        # d = 1 / np.sqrt(self.Rayleigh)
+        # q_x = -d*T_x
+        # q_y = -d*T_y
         return {"T": T, "T_t": T_t, "T_x": T_x, "T_y": T_y, "q_x": q_x, "q_y": q_y}
 
     def diffusion(self, pts, T_x, T_y):
@@ -200,6 +203,7 @@ class PINN_2D:
         diffusion = (T_xx + T_yy) * 1 / self.Peclet
         # diffusion = (T_xx + T_yy) * 1 / np.sqrt(self.Rayleigh * self.Prandtl)
         # diffusion = (T_xx + T_yy) 
+        # diffusion = (T_xx + T_yy) * 1 / np.sqrt(self.Rayleigh)
         return {"diffusion": diffusion, "T_xx": T_xx, "T_yy": T_yy}
 
     def advection(self, pts, T, T_x, T_y, u, v):
@@ -365,17 +369,17 @@ class PINN_2D:
         p_y = dp["p_y"]
 
         """Residuals"""
-        # residual_ns_x = u_t + uu_x + p_x - 1/self.Reynolds * (u_xx+u_yy) 
-        # residual_ns_y = v_t + vv_y + p_y - 1/self.Reynolds * (v_xx+v_yy) - self.Richardson * T
-
         residual_ns_x = u_t + uu_x + v*u_y + p_x - 1/self.Reynolds * (u_xx+u_yy) 
         residual_ns_y = v_t + u*v_x + vv_y + p_y - 1/self.Reynolds * (v_xx+v_yy) - self.Richardson * T
 
-        # residual_ns_x = u_t + uu_x + p_x - np.sqrt(self.Prandtl/self.Rayleigh)* (u_xx+u_yy) 
-        # residual_ns_y = v_t + vv_y + p_y - np.sqrt(self.Prandtl/self.Rayleigh)* (v_xx+v_yy)  - T
-
         # residual_ns_x = u_t + uu_x + v*u_y + p_x - np.sqrt(self.Prandtl/self.Rayleigh)* (u_xx+u_yy) 
-        # residual_ns_y = v_t + u*v_x + vv_y + p_y - np.sqrt(self.Prandtl/self.Rayleigh)* (v_xx+v_yy)  - T
+        # residual_ns_y = v_t + u*v_x + vv_y + p_y - np.sqrt(self.Prandtl/self.Rayleigh)* (v_xx+v_yy) - T
+
+        # residual_ns_x = 1/self.Prandtl * (u_t + uu_x + v*u_y) + p_x - (u_xx+u_yy) 
+        # residual_ns_y = 1/self.Prandtl * (v_t + u*v_x + vv_y) + p_y - (v_xx+v_yy) - self.Rayleigh * T
+        
+        # residual_ns_x = u_t + uu_x + v*u_y + p_x - self.Prandtl/np.sqrt(self.Rayleigh)* (u_xx+u_yy) 
+        # residual_ns_y = v_t + u*v_x + vv_y + p_y - self.Prandtl/np.sqrt(self.Rayleigh)* (v_xx+v_yy) - self.Prandtl*T
 
         r2_ns_x = residual_ns_x**2
         r2_ns_y = residual_ns_y**2
@@ -384,6 +388,7 @@ class PINN_2D:
         r2_continuity = residual_continuity**2
 
         residual_diffusion = T_t - diffusion + advection  # Heat Equation
+        # residual_diffusion = T_t - diffusion + advection - 1  # Heat Equation
         r2_heat = residual_diffusion**2 
         
         r2 = r2_ns_x + r2_ns_y + r2_continuity + r2_heat
@@ -429,8 +434,10 @@ class PINN_2D:
         if self.it % 100 == 0:
           weighted_loss = self.ic_weight*loss_ic + self.bc_weight*loss_bc + self.phys_weight*loss_physics 
           print("\nIC / BC / PDE", loss_ic.item(), loss_bc.item(), loss_physics.item())
-          if self.best_pde_loss > loss_bc.item():
+          if self.best_pde_loss > loss_physics.item() and self.it > 0:
+            # print("Saving state dict...")
             torch.save(self.net.state_dict(), model_path)
+            # self.best_pde_loss = loss_physics.item()
         self.it = self.it + 1
         return loss
     
@@ -542,25 +549,61 @@ class BC:
       marker=dict(
         size=2,
         color=err.flatten(),
-        colorscale="plasma"
+        colorscale="plasma",
+        colorbar=dict(thickness=20, x=int(np.random.rand()*4) )
       )
     )
     fig.add_trace(scat)
   
+class BCCicle(BC):
+  def __init__(self, truth_fn, pred_fn, ct=1000, axis_bounds=[[0, 4 * np.pi], [-4 * np.pi, 4 * np.pi], [-4 * np.pi, -4 * np.pi]], requires_grad=False, r=0.2, c=[0.75,0.75], mode='mask') -> None:
+    super().__init__(truth_fn, pred_fn, ct, axis_bounds, requires_grad)
+    self.r = r
+    self.c = torch.Tensor(c).to(device)
+    self.mode = mode
+  
+  def sample(self, cache=False, predict=False, ct=None):
+    pts = None
+    if self.mode == 'edge':
+      thetas = torch.rand((self.ct if ct == None else ct, 1), device=device, requires_grad=self.requires_grad)*2*np.pi
+      x = self.r*torch.cos(thetas) + self.c[0]
+      y = self.r*torch.sin(thetas) + self.c[1]
+      t = torch.rand((self.ct if ct == None else ct, 1), device=device, requires_grad=self.requires_grad)*self.axis_ranges[0] + self.axis_mins[0]
+      pts = torch.hstack([t,x,y])
+    elif self.mode == 'mask':
+      pts_tmp = torch.rand((self.ct if ct == None else ct, self.parent.dim), device=device, requires_grad=self.requires_grad)*self.axis_ranges+ self.axis_mins
+      mask_single = (pts_tmp[:,1:2]-self.c[0])**2 + (pts_tmp[:,2:3]-self.c[1])**2 > self.r**2
+      mask = mask_single.flatten()
+      pts = pts_tmp[mask]
+
+    truth = self.truth_fn(self.parent, pts)
+    if cache:
+      self.pts = pts
+      self.truth = truth
+    pred = None
+    if predict:
+      pred = self.predict(pts, cache=cache)
+
+    return {"pts": pts, "truth": truth, "pred": pred}
+  
+
 def get_d(pts):
   return torch.sqrt(torch.sum(pts[:,1:]**2, axis=1)).reshape(-1,1)
 
-t_bounds = [0, 20]
-s_bounds = [[-2,7], [0,3]]
+t_bounds = [0, 100]
+s_bounds = [[-3, 9], [-2,2]]
 if __name__ == "__main__":
 
-  model_path = Path(os.path.abspath(os.path.dirname(__file__))) / "models" / "new-bc-method.pth"
+  model_path = Path(os.path.abspath(os.path.dirname(__file__))) / "models" / "a100-fluid-method.pth"
   ADAPTIVE_SAMPLING = False
   ADAPTIVE_WEIGHTING = True
 
-  RICHARDSON=1.2
-  PECLET=5
-  REYNOLDS=400
+  # RICHARDSON=1.0
+  # PECLET=20
+  # REYNOLDS=1000
+  RICHARDSON=0
+  PECLET=50
+  REYNOLDS=300
 
   PRANDTL = 4.3 
   RAYLEIGH = 1000000
@@ -575,30 +618,69 @@ if __name__ == "__main__":
   y_range = y_max - y_min
 
 
-  block_l_edge = x_min + x_range/4
-  block_r_edge = block_l_edge + x_range/4
-  block_b_edge = y_min
-  block_t_edge = y_min + y_range/3
+  def no_u_no_qx_edge(pinn: PINN_2D, pts):
+    q_x = pts[:,1:2]*0
+    u = pts[:,1:2]*0
+    return torch.vstack([ q_x, u ])
+  
+  def no_v_yes_qy_edge(pinn: PINN_2D, pts):
+    q_y = pts[:,1:2]*0 + 0.1
+    v = pts[:,1:2]*0
+    return torch.vstack([ q_y, v ])
 
-  def heated_edge(pinn: PINN_2D, pts):
+  def no_v_hot_edge(pinn: PINN_2D, pts):
+    T = pts[:,1:2]*0 + 0.5
+    u = pts[:,1:2]*0
+    v = pts[:,1:2]*0
+    return torch.vstack([ T, v ])
+  
+  def no_slip_no_y_flux(pinn: PINN_2D, pts):
+    q = pts[:,1:2]*0
+    u = pts[:,1:2]*0
+    v = pts[:,1:2]*0
+    return torch.vstack([q,u,v])
+
+  def no_pen_no_y_flux(pinn: PINN_2D, pts):
+    q = pts[:,1:2]*0
+    v = pts[:,1:2]*0
+    return torch.vstack([q,v])
+
+  def no_v_cold_edge(pinn: PINN_2D, pts):
+    T = pts[:,1:2]*0 - 0.5
+    u = pts[:,1:2]*0
+    v = pts[:,1:2]*0
+    return torch.vstack([ T, v ])
+
+  def hot_edge_true(pinn: PINN_2D, pts):
     T = pts[:,1:2]*0 + 1 
     u = pts[:,2:3]*0
     v = pts[:,2:3]*0
     return torch.vstack([ T, u, v ])
 
+  def hot_ramped_edge_true(pinn: PINN_2D, pts):
+    T =  torch.sigmoid(pts[:,0:1]-6)
+    u = pts[:,2:3]*0
+    v = pts[:,2:3]*0
+    return torch.vstack([ T, u, v ])
 
-  def left_boundary_true(pinn: PINN_2D, pts):
-    T = pts[:,1:2]*0 # no heat flux
-    u = pts[:,1:2]*0 + 1 # rightward flow
+  def rightward_flow_inlet_true(pinn: PINN_2D, pts):
+    T = pts[:,1:2]*0 # constant temp
+    u = pts[:,1:2]*0 +1
     v = pts[:,1:2]*0 # no slip
     return torch.vstack([ T, u, v ])
 
-  def right_boundary_true(pinn: PINN_2D, pts):
+  def rightward_ramped_flow_inlet_true(pinn: PINN_2D, pts):
+    T = pts[:,1:2]*0 # constant temp
+    u = torch.sigmoid(pts[:,0:1]-6) # rightward flow
+    v = pts[:,1:2]*0 # no slip
+    return torch.vstack([ T, u, v ])
+
+  def zero_qxp_outlet_true(pinn: PINN_2D, pts):
     q_x = pts[:,1:2]*0 # no heat flux
     p = pts[:,1:2]*0 # zero pressure
     return torch.vstack([ q_x, p ])
 
-  def bottom_boundary_true(pinn: PINN_2D, pts):
+  def zero_Tuv_true(pinn: PINN_2D, pts):
     T = pts[:,1:2]*0
     u = pts[:,2:3]*0
     v = pts[:,2:3]*0
@@ -618,24 +700,32 @@ if __name__ == "__main__":
     # T = 2*((pts[:,2:3]-pinn.y_min)/pinn.y_range * 2 -1)#torch.sqrt(pts[:,1:2]**2 + pts[:,2:3]**2)
     # T = -0.5*((pts[:,2:3]-pinn.y_min)/pinn.y_range * 2 -1)
     # T = -1*((pts[:,2:3]-pinn.y_min)/pinn.y_range * 2 -1)
-    T = pts[:,2:3]*0 
+
+    # T = (pts[:,2:3]-y_min)/y_range * (-2) + 1
+    T = pts[:,1:2]*0
     u = pts[:,1:2]*0 
     v = pts[:,1:2]*0
-    # v = torch.abs(pinn.x_max - torch.abs(pts[:,2:3]))/(pinn.x_range/2)
-    # gaussian_sigma = 8
-    # gaussian_height = 30
-    # T = gaussian_height*(1/(gaussian_sigma*np.sqrt(2*np.pi)))*torch.exp(-(get_d(pts)**2) / (2*gaussian_sigma**2))
+    # T = torch.sin(pts[:,1:2]*10)*torch.sin(3.4*pts[:,2:3])*0.1
+    # u = torch.sin(pts[:,1:2]*13)*torch.sin(11.2*pts[:,2:3])*0.1
+    # v = torch.sin(pts[:,1:2]*7.4)*torch.sin(1.2*pts[:,2:3])*0.1
     return torch.vstack([T, u, v])
 
   def true_collocation(pinn: PINN_2D, pts):
     return pts[:,1:2]*0 # always 0
-
+  
   def Tuv_prediction(pinn: PINN_2D, pts):
     R = pinn.net(pts)
     T = R[:,0:1]
     u = R[:,1:2] 
     v = R[:,2:3]
     return torch.vstack([T, u, v])
+
+  def Tv_prediction(pinn: PINN_2D, pts):
+    R = pinn.net(pts)
+    T = R[:,0:1]
+    u = R[:,1:2] 
+    v = R[:,2:3]
+    return torch.vstack([T, v])
   
   def qxuv_prediction(pinn: PINN_2D, pts):
     R = pinn.net(pts)
@@ -663,117 +753,286 @@ if __name__ == "__main__":
     q_y = fluxes["q_y"]
     return torch.vstack([q_y, u, v])
 
+  def qyv_prediction(pinn: PINN_2D, pts):
+    R = pinn.net(pts)
+    T = R[:,0:1]
+    u = R[:,1:2]
+    v = R[:,2:3]
+    fluxes = pinn.heat_flux(pts, T)
+    q_y = fluxes["q_y"]
+    return torch.vstack([q_y, v])
+
+  def qxu_prediction(pinn: PINN_2D, pts):
+    R = pinn.net(pts)
+    T = R[:,0:1]
+    u = R[:,1:2]
+    v = R[:,2:3]
+    fluxes = pinn.heat_flux(pts, T)
+    q_x = fluxes["q_x"]
+    return torch.vstack([q_x, u])
+
   def predict_collocation(pinn: PINN_2D, pts):
     summary = pinn.governing_eq(pts)
     r2 = summary["r2"]
     return r2
 
-  bc_u = BC(
-    ct=100,
-    truth_fn=top_boundary_true, 
-    pred_fn=Tuv_prediction,
-    axis_bounds=[t_bounds, x_bounds, [y_max, y_max]], 
-    requires_grad=True,
-  )
-  bc_l = BC(
-    ct=100,
-    truth_fn=left_boundary_true,
-    pred_fn=Tuv_prediction,
-    axis_bounds=[t_bounds, [x_min, x_min], y_bounds], 
-    requires_grad=True,
-  )
-  bc_r = BC(
-    ct=100,
-    truth_fn=right_boundary_true,
-    pred_fn=qxp_prediction,
-    axis_bounds=[t_bounds, [x_max, x_max], y_bounds], 
-    requires_grad=True,
-  )
-  box_boundary_t = BC(
-    ct=100,
-    truth_fn=heated_edge,
-    pred_fn=Tuv_prediction,
-    axis_bounds=[t_bounds, [block_l_edge, block_r_edge], [block_t_edge, block_t_edge]], 
-    requires_grad=True,
-  )
-  box_boundary_l= BC(
-    ct=100,
-    truth_fn=heated_edge,
-    pred_fn=Tuv_prediction,
-    axis_bounds=[t_bounds, [block_l_edge, block_l_edge], [block_b_edge, block_t_edge]], 
-    requires_grad=True,
-  )
-  box_boundary_r= BC(
-    ct=100,
-    truth_fn=heated_edge,
-    pred_fn=Tuv_prediction,
-    axis_bounds=[t_bounds, [block_r_edge, block_r_edge], [block_b_edge, block_t_edge]], 
-    requires_grad=True,
-  )
+  def make_vk_cyl():
+    bc_u = BC(
+      ct=1000,
+      # truth_fn=no_slip_no_y_flux, 
+      # pred_fn=qyuv_prediction,
+      truth_fn=no_pen_no_y_flux, 
+      pred_fn=qyv_prediction,
+      axis_bounds=[t_bounds, x_bounds, [y_max, y_max]], 
+      requires_grad=True,
+    )
+    bc_d = BC(
+      ct=1000,
+      # truth_fn=no_slip_no_y_flux, 
+      # pred_fn=qyuv_prediction,
+      truth_fn=no_pen_no_y_flux, 
+      pred_fn=qyv_prediction,
+      axis_bounds=[t_bounds, x_bounds, [y_min, y_min]], 
+      requires_grad=True,
+    )
+    bc_inlet = BC(
+      ct=1000,
+      truth_fn=rightward_ramped_flow_inlet_true,
+      pred_fn=Tuv_prediction,
+      axis_bounds=[t_bounds, [x_min, x_min],y_bounds], 
+      requires_grad=True,
+    )
+    bc_outlet = BC(
+      ct=1000,
+      truth_fn=zero_qxp_outlet_true,
+      pred_fn=qxp_prediction,
+      # truth_fn=zero_qxp_outlet_true,
+      # pred_fn=qxp_prediction,
+      axis_bounds=[t_bounds, [x_max, x_max],y_bounds], 
+      requires_grad=True,
+    )
+    r=0.5
+    c=[0,0]
+    bc_cyl = BCCicle(
+      ct=1000,
+      truth_fn=hot_ramped_edge_true,
+      pred_fn=Tuv_prediction,
+      axis_bounds=[t_bounds, x_bounds, y_bounds], 
+      requires_grad=True,
+      mode="edge",
+      r=r,
+      c=c
+    )
+    col = BCCicle(
+      ct=8000,
+      truth_fn=true_collocation,
+      pred_fn=predict_collocation,
+      axis_bounds=[t_bounds, x_bounds, y_bounds], 
+      requires_grad=True,
+      mode="mask",
+      r=r,
+      c=c
+    )
+    ic = BCCicle(
+      ct=4000,
+      truth_fn=zero_Tuv_true,
+      pred_fn=Tuv_prediction,
+      # truth_fn=zero_Tuv_true,
+      # pred_fn=Tuv_prediction,
+      axis_bounds=[[t_bounds[0], t_bounds[0]], x_bounds, y_bounds], 
+      requires_grad=True,
+      mode="mask",
+      r=r,
+      c=c
+    )
+    ics = [ic]
+    bcs = [bc_inlet, bc_outlet, bc_u, bc_d, bc_cyl]
+    col = [col]
+    return ics, bcs, col
 
-  bc_d_l = BC(
-    ct=100,
-    truth_fn=bottom_boundary_true, 
-    pred_fn=Tuv_prediction,
-    axis_bounds=[t_bounds,[x_min, block_l_edge], [y_min, y_min]], 
-    requires_grad=True,
-  )
-  bc_d_r = BC(
-    ct=100,
-    truth_fn=bottom_boundary_true, 
-    pred_fn=Tuv_prediction,
-    axis_bounds=[t_bounds, [block_r_edge, x_max], [y_min, y_min]], 
-    requires_grad=True,
-  )
+  def make_heated_box():
+    block_l_edge = x_min + x_range/4
+    block_r_edge = block_l_edge + x_range/4
+    block_b_edge = y_min
+    block_t_edge = y_min + y_range/3
 
-  collocation_a = BC(
-    ct=850,
-    truth_fn=true_collocation,
-    pred_fn=predict_collocation,
-    axis_bounds=[t_bounds, [x_min, block_l_edge], y_bounds], 
-    requires_grad=True,
-  )
-  collocation_b = BC(
-    ct=850,
-    truth_fn=true_collocation,
-    pred_fn=predict_collocation,
-    axis_bounds=[t_bounds, [block_l_edge, block_r_edge],[block_t_edge, y_max]], 
-    requires_grad=True,
-  )
-  collocation_c = BC(
-    ct=850,
-    truth_fn=true_collocation,
-    pred_fn=predict_collocation,
-    axis_bounds=[t_bounds, [block_r_edge, x_max], y_bounds], 
-    requires_grad=True,
-  )
+    bc_u = BC(
+      ct=100,
+      truth_fn=zero_Tuv_true, 
+      pred_fn=Tuv_prediction,
+      axis_bounds=[t_bounds, x_bounds, [y_max, y_max]], 
+      requires_grad=True,
+    )
+    bc_l = BC(
+      ct=100,
+      truth_fn=zero_Tuv_true,
+      pred_fn=Tuv_prediction,
+      axis_bounds=[t_bounds, [x_min, x_min], [y_min+(y_max-y_min)/3, y_max]], 
+      requires_grad=True,
+    )
+    bc_inlet = BC(
+      ct=100,
+      truth_fn=rightward_flow_inlet_true,
+      pred_fn=Tuv_prediction,
+      axis_bounds=[t_bounds, [x_min, x_min],[y_min, y_min+(y_max-y_min)/3]], 
+      requires_grad=True,
+    )
+    bc_r = BC(
+      ct=100,
+      truth_fn=zero_Tuv_true,
+      pred_fn=Tuv_prediction,
+      axis_bounds=[t_bounds, [x_max, x_max],[y_min, y_min+2*(y_max-y_min)/3]], 
+      requires_grad=True,
+    )
 
-  ic_a = BC(
-    ct=300,
-    truth_fn=ic_true,
-    pred_fn=Tuv_prediction,
-    axis_bounds=[[t_bounds[0], t_bounds[0]], [x_min, block_l_edge], y_bounds], 
-    requires_grad=True,
-  )
-  ic_b = BC(
-    ct=300,
-    truth_fn=ic_true,
-    pred_fn=Tuv_prediction,
-    axis_bounds=[[t_bounds[0], t_bounds[0]], [block_l_edge, block_r_edge],[block_t_edge, y_max]], 
-    requires_grad=True,
-  )
-  ic_c = BC(
-    ct=300,
-    truth_fn=ic_true,
-    pred_fn=Tuv_prediction,
-    axis_bounds=[[t_bounds[0], t_bounds[0]], [block_r_edge, x_max], y_bounds], 
-    requires_grad=True,
-  )
+    bc_outlet = BC(
+      ct=100,
+      truth_fn=zero_qxp_outlet_true,
+      pred_fn=qxp_prediction,
+      axis_bounds=[t_bounds, [x_max, x_max],[y_min+2*(y_max-y_min)/3, y_max]], 
+      requires_grad=True,
+    )
+    bc_d_l = BC(
+      ct=100,
+      truth_fn=zero_Tuv_true, 
+      pred_fn=Tuv_prediction,
+      axis_bounds=[t_bounds,[x_min, block_l_edge], [y_min, y_min]], 
+      requires_grad=True,
+    )
+    bc_d_r = BC(
+      ct=100,
+      truth_fn=zero_Tuv_true, 
+      pred_fn=Tuv_prediction,
+      axis_bounds=[t_bounds, [block_r_edge, x_max], [y_min, y_min]], 
+      requires_grad=True,
+    )
+
+    box_boundary_t = BC(
+      ct=100,
+      truth_fn=hot_edge_true,
+      pred_fn=Tuv_prediction,
+      axis_bounds=[t_bounds, [block_l_edge, block_r_edge], [block_t_edge, block_t_edge]], 
+      requires_grad=True,
+    )
+    box_boundary_l= BC(
+      ct=100,
+      truth_fn=hot_edge_true,
+      pred_fn=Tuv_prediction,
+      axis_bounds=[t_bounds, [block_l_edge, block_l_edge], [block_b_edge, block_t_edge]], 
+      requires_grad=True,
+    )
+    box_boundary_r= BC(
+      ct=100,
+      truth_fn=hot_edge_true,
+      pred_fn=Tuv_prediction,
+      axis_bounds=[t_bounds, [block_r_edge, block_r_edge], [block_b_edge, block_t_edge]], 
+      requires_grad=True,
+    )
+
+    collocation_a = BC(
+      ct=850,
+      truth_fn=true_collocation,
+      pred_fn=predict_collocation,
+      axis_bounds=[t_bounds, [x_min, block_l_edge], y_bounds], 
+      requires_grad=True,
+    )
+    collocation_b = BC(
+      ct=850,
+      truth_fn=true_collocation,
+      pred_fn=predict_collocation,
+      axis_bounds=[t_bounds, [block_l_edge, block_r_edge],[block_t_edge, y_max]], 
+      requires_grad=True,
+    )
+    collocation_c = BC(
+      ct=850,
+      truth_fn=true_collocation,
+      pred_fn=predict_collocation,
+      axis_bounds=[t_bounds, [block_r_edge, x_max], y_bounds], 
+      requires_grad=True,
+    )
+
+    ic_a = BC(
+      ct=300,
+      truth_fn=ic_true,
+      pred_fn=Tuv_prediction,
+      axis_bounds=[[t_bounds[0], t_bounds[0]], [x_min, block_l_edge], y_bounds], 
+      requires_grad=True,
+    )
+    ic_b = BC(
+      ct=300,
+      truth_fn=ic_true,
+      pred_fn=Tuv_prediction,
+      axis_bounds=[[t_bounds[0], t_bounds[0]], [block_l_edge, block_r_edge],[block_t_edge, y_max]], 
+      requires_grad=True,
+    )
+    ic_c = BC(
+      ct=300,
+      truth_fn=ic_true,
+      pred_fn=Tuv_prediction,
+      axis_bounds=[[t_bounds[0], t_bounds[0]], [block_r_edge, x_max], y_bounds], 
+      requires_grad=True,
+    )
 
 
-  bcs = [bc_d_l, bc_d_r, bc_u, bc_l, bc_r, box_boundary_l, box_boundary_r, box_boundary_t]
-  ics = [ic_a,ic_b,ic_c]
-  collocation_pts = [collocation_a, collocation_b, collocation_c]
+    # DEFINITION for heated block!
+    bcs = [bc_d_l, bc_d_r, bc_u, bc_l, bc_r, bc_inlet, bc_outlet, box_boundary_l, box_boundary_r, box_boundary_t]
+    ics = [ic_a,ic_b,ic_c]
+    collocation_pts = [collocation_a, collocation_b, collocation_c]
+    return ics, bcs, collocation_pts
+
+
+  def make_rbc():
+    bc_d = BC(
+      ct=500,
+      truth_fn=no_v_hot_edge, 
+      pred_fn=Tv_prediction,
+      axis_bounds=[t_bounds, x_bounds, [y_min, y_min]], 
+      requires_grad=True,
+    )
+    bc_u = BC(
+      ct=500,
+      truth_fn=no_v_cold_edge, 
+      pred_fn=Tv_prediction,
+      axis_bounds=[t_bounds, x_bounds, [y_max, y_max]], 
+      requires_grad=True,
+    )
+    bc_l = BC(
+      ct=500,
+      truth_fn=no_u_no_qx_edge, 
+      pred_fn=qxu_prediction,
+      axis_bounds=[t_bounds,[x_min,x_min], y_bounds], 
+      requires_grad=True,
+    )
+    bc_r = BC(
+      ct=500,
+      truth_fn=no_u_no_qx_edge, 
+      pred_fn=qxu_prediction,
+      axis_bounds=[t_bounds,[x_max, x_max], y_bounds], 
+      requires_grad=True,
+    )
+
+    ic = BC(
+      ct=2000,
+      truth_fn=ic_true,
+      pred_fn=Tuv_prediction,
+      axis_bounds=[[t_bounds[0], t_bounds[0]], x_bounds, y_bounds], 
+      requires_grad=True,
+    )
+
+    collocation = BC(
+      ct=8000,
+      truth_fn=true_collocation,
+      pred_fn=predict_collocation,
+      axis_bounds=[t_bounds, x_bounds, y_bounds], 
+      requires_grad=True,
+    )
+
+    bcs = [bc_d,bc_u,bc_l,bc_r]
+    ics = [ic]
+    collocation_pts=[collocation]
+    return ics, bcs, collocation_pts
+  
+  ics, bcs, collocation_pts = make_vk_cyl()
 
   pinn = PINN_2D(
       net=MLP(input_dim=3, output_dim=4, hidden_layer_ct=4,hidden_dim=256, act=F.tanh, learnable_act="SINGLE"), 
@@ -793,11 +1052,17 @@ if __name__ == "__main__":
   )
   # pinn.plot_bcs_and_ics(ct=200)
 
-  # fig = plt.figure()
-  # for bc in pinn.BCs:
-  #   pts = bc.sample(ct=500)["pts"].detach().cpu()
-  #   plt.scatter(pts[:,1:2],pts[:,2:3],s=0.5)
-  # plt.show()
+  fig = plt.figure()
+  for bc in pinn.BCs:
+    pts = bc.sample(ct=1000)["pts"].detach().cpu()
+    plt.scatter(pts[:,1:2],pts[:,2:3],s=0.5)
+  for ic in pinn.ICs:
+    pts = ic.sample(ct=1000)["pts"].detach().cpu()
+    plt.scatter(pts[:,1:2],pts[:,2:3],s=0.5)
+  for col in pinn.collocation_pts:
+    pts = col.sample(ct=5000)["pts"].detach().cpu()
+    plt.scatter(pts[:,1:2],pts[:,2:3],s=1)
+  plt.show()
 
   # pinn.plot_bcs_and_ics("Truth", 2000)
 
@@ -813,4 +1078,9 @@ if __name__ == "__main__":
         pinn.adam.param_groups[0]["lr"] = 1e-5
     if i == 4:
         pinn.adam.param_groups[0]["lr"] = 5e-6
+    pinn.plot_bcs_and_ics(mode='error', ct=5000)
+    fig = go.Figure()
+    pinn.collocation_pts[0].add_error_to_fig(fig, 5000)
+    fig.show()
     pinn.train(n_epochs=1000, reporting_frequency=100, phys_weight=1, res_weight=0.01, bc_weight=8, ic_weight=4)
+    # pinn.plot_bcs_and_ics(mode='error', ct=5000)
