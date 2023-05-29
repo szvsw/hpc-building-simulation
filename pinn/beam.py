@@ -24,14 +24,16 @@ class PINNSSSBeam:
       net: MLP, 
       lr=1e-4, 
       collocation_ct=10000,
+      bc_ct=1000,
       space_bounds=[-1,1],
+      I_a_bounds=[0,2],
       adaptive_resample=True,
       sample_freq=10,
       soft_adapt_weights=True,
       model_prefix="SimplySupportedStaticBeam"
     ) -> None:
         plt.ion()
-        self.fig = plt.figure()
+        self.fig, self.axs = plt.subplots(3,1,figsize=(8,8))
         self.net = net.to(device)
         self.loss_fn = nn.MSELoss()
         self.adam = torch.optim.Adam(self.net.parameters(), lr=lr)
@@ -39,9 +41,14 @@ class PINNSSSBeam:
 
         self.s_min: float = space_bounds[0]
         self.s_max: float = space_bounds[1]
-        self.s_range = self.s_max - self.s_min
+        self.s_range: float = self.s_max - self.s_min
+
+        self.I_a_min: float = I_a_bounds[0]
+        self.I_a_max: float = I_a_bounds[1]
+        self.I_a_range = self.I_a_max - self.I_a_min
 
         self.collocation_ct = collocation_ct
+        self.bc_ct = bc_ct
         self.adaptive_resample =  adaptive_resample
         self.sample_freq = sample_freq
 
@@ -59,13 +66,13 @@ class PINNSSSBeam:
         self.model_prefix = model_prefix
 
         self.I = 1
-        self.I_fn = lambda pts: -1*(pts-self.s_min)*(pts-self.s_max) + 1
+        self.I_fn = lambda pts: -(pts[:,0:1])*(pts[:,1:2]-self.s_min)*(pts[:,1:2]-self.s_max) + 1
         self.E = 1
         # self.force_fn = lambda pts: 1/(0.1*np.sqrt(2*np.pi)) * torch.exp(-0.5*(pts**2)/(0.1**2))
         self.force_fn = lambda pts: -1/(0.1*np.sqrt(2*np.pi)) * torch.exp(-0.5*(pts**2)/(0.1**2))
         self.force_fn = lambda pts: -3 * torch.sigmoid((pts-0.5)*30)
-        self.force_fn = lambda pts: -1 + 0*pts
-        self.dim = 1
+        self.force_fn = lambda pts: -1 + 0*pts[:,1:2]
+        self.dim = 2
 
     def model_path(self, it):
         return Path(os.path.abspath(os.path.dirname(__file__))) / "models" / f"{self.model_prefix}-{it:05d}.pth"
@@ -74,7 +81,8 @@ class PINNSSSBeam:
         initial_ct = self.collocation_ct*10
         pts_rand = torch.rand((initial_ct, self.dim), device=device, requires_grad=True)
         pts = torch.empty_like(pts_rand)
-        pts = pts_rand * self.s_range + self.s_min
+        pts[:,0] = pts_rand[:,0] * self.I_a_range + self.I_a_min
+        pts[:,1] = pts_rand[:,1] * self.s_range + self.s_min
         results = self.governing_eq(pts)
         r2 = results["r2"]
         e_r2 = torch.mean(r2)
@@ -88,22 +96,25 @@ class PINNSSSBeam:
     def sample_collocation_non_adaptive(self):
         pts_rand = torch.rand((self.collocation_ct,self.dim), device=device, requires_grad=True)
         pts = torch.empty_like(pts_rand)
-        pts = pts_rand * self.s_range + self.s_min
+        pts[:,0] = pts_rand[:,0] * self.I_a_range + self.I_a_min
+        pts[:,1] = pts_rand[:,1] * self.s_range + self.s_min
         results = self.governing_eq(pts)
 
         return pts, results
     
     def sample_bcs(self):
-        pts = torch.Tensor([
-           [self.s_min],
-           [self.s_max],
-        ]).requires_grad_(True).to(device)
+        pts_rand = torch.rand((self.bc_ct, self.dim), device=device, requires_grad=True)
+        pts = torch.empty_like(pts_rand)
+        pts[:,0] = pts_rand[:,0] * self.I_a_range + self.I_a_min
+        half = int(self.bc_ct/2)
+        pts[:half,1] = pts_rand[:half,1]*0 + self.s_min
+        pts[half:,1] = pts_rand[half:,1]*0 + self.s_max
 
         results = self.governing_eq(pts)
         return pts, results
 
     def euler_bernoulli(self, pts, w):
-        w_x = torch.autograd.grad(
+        w_grad = torch.autograd.grad(
             inputs=pts,
             outputs=w,
             grad_outputs=torch.ones_like(w).to(device),
@@ -111,7 +122,9 @@ class PINNSSSBeam:
             retain_graph=True
         )[0]
 
-        w_xx = torch.autograd.grad(
+        w_x = w_grad[:,1:2]
+
+        w_x_grad = torch.autograd.grad(
             inputs=pts,
             outputs=w_x,
             grad_outputs=torch.ones_like(w_x).to(device),
@@ -119,10 +132,13 @@ class PINNSSSBeam:
             retain_graph=True
         )[0]
 
+        w_xx = w_x_grad[:,1:2]
+
+
         # EIw_xx = self.E*self.I*w_xx
         EIw_xx = self.E*self.I_fn(pts)*w_xx
 
-        EIw_xxx = torch.autograd.grad(
+        EIw_xx_grad = torch.autograd.grad(
             inputs=pts,
             outputs=EIw_xx,
             grad_outputs=torch.ones_like(EIw_xx).to(device),
@@ -130,13 +146,17 @@ class PINNSSSBeam:
             retain_graph=True
         )[0]
 
-        EIw_xxxx = torch.autograd.grad(
+        EIw_xxx = EIw_xx_grad[:,1:2]
+
+        EIw_xxx_grad = torch.autograd.grad(
             inputs=pts,
             outputs=EIw_xxx,
             grad_outputs=torch.ones_like(EIw_xxx).to(device),
             create_graph=True,
             retain_graph=True
         )[0]
+
+        EIw_xxxx = EIw_xxx_grad[:,1:2]
 
 
         return {
@@ -201,16 +221,45 @@ class PINNSSSBeam:
             print("\n BC / PDE / Weighted", loss_bc.item(), loss_physics.item(), loss.item())
 
         if self.it %  self.plot_frequency == 0:
-            x = torch.linspace(self.s_min,self.s_max,1000,device=device).reshape(-1,1)
+            n_pts = 1000
+            n_alphas = 5
+            x = torch.linspace(self.s_min,self.s_max,n_pts,device=device)
+            I_a = torch.linspace(self.I_a_min, self.I_a_max, n_alphas, device=device)
+            xx, II_a = torch.meshgrid(x,I_a, indexing="ij")
+            pts = torch.dstack([ II_a, xx ])
+            pts_flat = pts.reshape(-1,2)
+
             with torch.no_grad():
-                w = self.net(x)
-            self.fig.clear()
-            plt.gca().set_aspect('equal')
-            plt.plot(x.flatten().cpu(),w.flatten().cpu())
-            plt.ylim([-0.25,0.25])
-            plt.plot([self.s_min, self.s_min], [-2, 2], "--", c="gray", lw=0.5)
-            plt.plot([self.s_max, self.s_max], [-2, 2], "--", c="gray", lw=0.5)
-            plt.plot([self.s_min, self.s_max], [0,0], "--", c="gray", lw=0.5)
+                w = self.net(pts_flat).reshape(n_pts,n_alphas,1)
+                I = self.I_fn(pts_flat).reshape(n_pts,n_alphas,1)
+                f = self.force_fn(pts_flat).reshape(n_pts,n_alphas,1)
+
+            for i in range(3):
+                self.axs[i].clear()
+            self.axs[0].set_aspect('equal')
+
+            for i in range(n_alphas):
+                self.axs[0].plot(x.flatten().cpu(),w[:,i,:].flatten().cpu(), label=f"a={I_a[i].item():0.2f}", lw=1)
+
+            for i in range(n_alphas):
+                self.axs[1].plot(x.flatten().cpu(),I[:,i,:].flatten().cpu(), label=f"a={I_a[i].item():0.2f}", lw=1)
+
+            for i in range(n_alphas):
+                self.axs[2].plot(x.flatten().cpu(),f[:,i,:].flatten().cpu(), label=f"a={I_a[i].item():0.2f}", lw=1)
+            
+            self.axs[0].set_title("Displacement")
+            self.axs[0].set_ylim([-0.5,0.1])
+            self.axs[1].set_title("Moment of Inertia")
+            self.axs[1].set_ylim([0,3.5])
+            self.axs[2].set_title("Applied Force")
+            # self.axs[2].set_ylim([-1,1])
+
+            for i in range(3):
+                self.axs[i].legend()
+                self.axs[i].plot([self.s_min, self.s_min], [-4, 4], "--", c="gray", lw=0.5)
+                self.axs[i].plot([self.s_max, self.s_max], [-4, 4], "--", c="gray", lw=0.5)
+                self.axs[i].plot([self.s_min, self.s_max], [0,0], "--", c="gray", lw=0.5)
+            self.fig.tight_layout()
             self.fig.canvas.flush_events()
             self.fig.canvas.draw()
 
@@ -242,12 +291,17 @@ if __name__ == "__main__":
   ADAPTIVE_SAMPLING = False
   ADAPTIVE_WEIGHTING = False
   space_bounds = [-1,1]
+  I_a_bounds = [0,2]
+  collocation_ct = 5000
+  bc_ct = 1000
 
   pinn = PINNSSSBeam(
-      net=MLP(input_dim=1, output_dim=1, hidden_layer_ct=4,hidden_dim=256, act=F.tanh, learnable_act="SINGLE"), 
+      net=MLP(input_dim=2, output_dim=1, hidden_layer_ct=4,hidden_dim=256, act=F.tanh, learnable_act="SINGLE"), 
       lr=1e-3,
-      collocation_ct=5000,
+      collocation_ct=collocation_ct,
+      bc_ct=bc_ct,
       space_bounds=space_bounds,
+      I_a_bounds=I_a_bounds,
       adaptive_resample=ADAPTIVE_SAMPLING,
       soft_adapt_weights=ADAPTIVE_WEIGHTING,
       model_prefix=MODEL_PREFIX
@@ -265,5 +319,5 @@ if __name__ == "__main__":
         pinn.adam.param_groups[0]["lr"] = 1e-5
     if i == 6:
         pinn.adam.param_groups[0]["lr"] = 5e-6
-    pinn.train(n_epochs=1000, reporting_frequency=100, plot_frequency=10, phys_weight=1, bc_weight=8)
+    pinn.train(n_epochs=1000, reporting_frequency=100, plot_frequency=100, phys_weight=1, bc_weight=8)
     # pinn.plot_bcs_and_ics(mode='error', ct=5000)
