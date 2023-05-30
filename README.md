@@ -12,7 +12,7 @@ In this `/pinn` directory of this repo, you can find some of my ongoing experime
 
 #### Static Euler-Bernoulli Beam Equation with Spatially Varying Geometry
 
-rapidly expanding but also WIP. The key innovation here is that the model is solving an entire range of parameterized PDEs simultaneously, i.e. it is solving the solution for all geometric possibilities entailed by a parameterized definition of the second moment of area.  On the horizon is using B-splines to generate the geometry and then derive the second moment of area rather than explicitly defining a parameteric function for the second moment, parameterizing the load function and/or predicting multiple load cases simultaneously, simultaneously solving multiple beam lengths (i.e. parameterizing the domain).  The ultimate goal is to use the network in a design optimization problem.
+rapidly expanding but also WIP. The key innovation here is that the model is solving an entire range of parameterized PDEs simultaneously, i.e. it is solving the solution for all geometric possibilities entailed by a parameterized definition of the second moment of area.  On the horizon is using B-splines to generate the geometry (T-beam sectional widths/heights) rather than quadratics before deriving the second moment of area, parameterizing the load function and/or predicting multiple load cases simultaneously, simultaneously solving multiple beam lengths (i.e. parameterizing the domain).  The ultimate goal is to use the network in a design optimization problem.
 
 #### Harmonic Oscillator
 
