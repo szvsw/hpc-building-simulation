@@ -131,4 +131,5 @@ dmypy.json
 # custom
 imgui.ini
 
+*.3dmbak
 **/videos/*.png

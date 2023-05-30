@@ -4,94 +4,268 @@ import numpy as np
 import taichi as ti
 import matplotlib.pyplot as plt
 
-"""
-Material Defs
-K [W/mK], Cp [J/kgK], rho [kg/m3]
-
-J s^-1 m^-1 K^-1 J^-1 kg K kg^-1 m3
-J J^-1  K^-1 K kg kg^-1  m3 m^-1 s^-1 
-m2 m s^-1  
-"""
-print(f"--- Material Library ---")
-mat_names = [
-    "outer",
-    "channel",
-    "concrete",
-    "xps"
-]
-mat_defs = np.array([
-    [3.0, 3000, 1000], 
-    [6.0, 3000, 1000],
-    [2.3, 1000, 2300], 
-    [0.039, 1450, 35],
-])
-mat_diffs = mat_defs[:,0]/(mat_defs[:,1]*mat_defs[:,2])
-mat_ids = {
-    name: i for i,name in enumerate(mat_names)
-}
-for name,mat_id in mat_ids.items():
-    print(f"\nMaterial: {name}")
-    print(f"k:   {mat_defs[mat_id, 0]:0.2f} [W/mK]")
-    print(f"Cp:  { int(mat_defs[mat_id, 1]):04d} [J/kgK]")
-    print(f"rho: { int(mat_defs[mat_id, 2]):04d} [kg/m3]")
-    print(f"D:   {  mat_diffs[mat_id]:0.3e} [m2/s]")
-
 
 @ti.data_oriented
 class Solver:
-    def __init__(self, dt, dx, n, D, boundary_values, colormap, u_min, u_range, updates_per_batch) -> None:
+    def __init__(self, dt, dx, n, D, mat_ids, mat_defs, mat_diffs, boundary_values, colormap, u_min, u_range, updates_per_batch) -> None:
+
+        """Consts"""
         self.mesh_render_size = 5
+        self.mesh_height = 1.5
         self.u_min = u_min
         self.u_range = u_range
         self.n  = n
         self.dx = dx
         self.L  = dx * (n - 1)
         self.dt = dt
-        self.c  = self.dt / self.dx**2
-
-        self.mat = ti.field(dtype=ti.i8, shape=(n,n))
-        self.k  = ti.field(dtype=float, shape=(n,n))
-        self.rho  = ti.field(dtype=float, shape=(n,n))
-        self.cp  = ti.field(dtype=float, shape=(n,n))
-        self.D  = ti.field(dtype=float, shape=(n,n))
-        self.u = ti.field(dtype=float, shape=(n,n))
-        self.colors   = ti.Vector.field(3, dtype=ti.f32, shape=(2*n, 2*n))
-        self.populate_D(D)
-        self.boundaries = ti.field(dtype=float, shape=(2,2))
+        self.c  = self.dt / (self.dx**2)
         self.updates_per_batch = updates_per_batch
-        for col in range(2):
-            for row in range(2):
-                bound = np.array(boundary_values)[col, row]
+        self.tol = 0.0001
+
+        """Material Dicts"""
+        self.mat_ids = mat_ids
+        self.mat_defs = mat_defs
+        self.mat_diffs = mat_diffs
+        self.mat_defs_field = ti.field(dtype=float, shape=mat_defs.shape)
+        self.mat_ids_field = ti.field(dtype=int, shape=(n,n))
+        self.mat_diffs_field = ti.field(dtype=int, shape=mat_diffs.shape)
+
+        "Time Field"
+        self.t = ti.field(dtype=float, shape=())
+
+        """Material Data Fields"""
+        self.mat     = ti.field(dtype=ti.i8, shape=(n,n))
+        self.k       = ti.field(dtype=float, shape=(n,n))
+        self.k_mid   = ti.field(dtype=float, shape=(n,n,4)) # left, right, down, up
+        self.k_sum   = ti.field(dtype=float, shape=(n,n))   # sum of k_mid
+        self.rho     = ti.field(dtype=float, shape=(n,n))
+        self.cp      = ti.field(dtype=float, shape=(n,n))
+        self.cv      = ti.field(dtype=float, shape=(n,n))   # self.rho * self.cp
+        self.c_cvinv = ti.field(dtype=float, shape=(n,n))   # self.rho * self.cp
+        self.denom   = ti.field(dtype=float, shape=(n,n))   # self.rho * self.cp
+        self.D       = ti.field(dtype=float, shape=(n,n))   # self.k / self.cv
+
+
+        """BC Fields"""
+        self.boundaries = ti.field(dtype=float, shape=(2,2))
+
+        """Solution Fields"""
+        self.u = ti.field(dtype=float, shape=(n,n))
+        self.u_next = ti.field(dtype=float, shape=(n,n))
+        self.u_tmp = ti.field(dtype=float, shape=(n,n))
+        self.q = ti.field(dtype=float, shape=(n,n))
+
+        """Rendering Fields"""
+        self.colors   = ti.Vector.field(3, dtype=ti.f32, shape=(2*n, 2*n))
+        self.colormap_field = ti.Vector.field(3, dtype=ti.f32, shape=len(colormap))
+
+        """"Mesh Fields"""
+        self.vertices = ti.Vector.field(3,dtype=ti.float32, shape=(self.n**2))
+        self.indices = ti.field(dtype=int, shape=(3*2*(self.n-1)**2))
+        self.mesh_colors = ti.Vector.field(3,dtype=ti.float32, shape=(self.n**2))           
+        
+
+
+
+        """Inits"""
+        self.t[None] = 0
+        self.init_boundary_values(boundary_values)
+        self.populate_u0()
+        if type(self.mat_ids) is type(np.zeros(2)):
+            self.mat_defs_field.from_numpy(self.mat_defs.astype(np.float32))
+            self.mat_ids_field.from_numpy(self.mat_ids)
+            self.mat_diffs_field.from_numpy(self.mat_diffs.astype(np.float32))
+            self.populate_mat_properties()
+        else:
+            self.populate_D(D)
+        self.precompute_coeffs()
+        self.init_colormap(colormap)
+        self.load_material_colors(D_max=D)
+        # self.load_material_colors(D_max=ti.max(self.D))
+
+        self.fig = plt.figure()
+        self.X, self.Y = np.meshgrid(np.arange(self.n), np.arange(self.n), indexing="xy")
+        d = self.cp.to_numpy().T
+        dr = np.roll(d, 1,axis=0)
+        du = np.roll(d, 1,axis=1)
+        d = np.logical_or(du != d, dr != d)
+        self.edges = d*255
+
+    def init_boundary_values(self, boundary_values):
+        # NB: this does not init the cells, just the reference values!
+        for ver_vs_hor in range(2):
+            for a_vs_b in range(2):
+                bound = np.array(boundary_values)[ver_vs_hor , a_vs_b]
                 if bound >= 0:
                     bound = bound*self.u_range + self.u_min
                 else:
                     bound = -1
-                self.boundaries[col, row] = bound
-        self.q = ti.field(dtype=float, shape=(n,n))
-        self.u_next = ti.field(dtype=float, shape=(n,n))
+                self.boundaries[ver_vs_hor, a_vs_b] = bound
 
-        # rendering
-        self.colormap_field = ti.Vector.field(3, dtype=ti.f32, shape=len(colormap))
+    def init_colormap(self, colormap):
         for i, color in enumerate(colormap):
             self.colormap_field[i] = ti.Vector(color)
 
+    @ti.kernel
+    def populate_u0(self):
+        for k in ti.grouped(self.u):
+            self.u[k] = self.u_min + self.u_range * k.x / self.n
+            self.u[k] = self.u_min + ti.random()*self.u_range
+            self.u[k] = self.u_min 
+            # self.u[k] = self.u_min + self.u_range/2 + ti.abs(0.5 - k.x/self.n)*self.u_range - ti.abs(0.5 - k.y/self.n)*self.u_range
+
+            """Gaussian"""
+            x = k.x / (self.n-1) - 0.5
+            y = k.y / (self.n-1) - 0.15
+            d2 = x**2 + y**2
+            sigma = 0.05
+            A = 2
+            self.u[k] = A*1/(sigma*ti.sqrt(2*np.pi)) * ti.exp(-(d2) / (2*sigma**2))*self.u_range + self.u_min
+
+            """Sine Field"""
+            wn_x = 4
+            wn_y = 2
+            x = (k.x / (self.n-1))*2*np.pi * wn_x
+            y = (k.y / (self.n-1))*2*np.pi * wn_y
+            self.u[k] = (0.5*ti.sin(x)+0.5)*self.u_range/2  + (0.5*ti.cos(y)+0.5)*self.u_range/2 + self.u_min
+            
+            """Min"""
+            self.u[k] = self.u_min 
+
+
+
+            """Prepare for Jacobi/Gauss-Seidel"""
+            self.u_next[k] = self.u[k]
+
+    @ti.kernel
+    def populate_mat_properties(self):
+        print("Populating material properties from mat map")
+        # TODO: self.mat_ids_field is a duplicate of self.mat
+        for col,row in self.D:
+            self.k[col, row]   = self.mat_defs_field[self.mat_ids_field[col, row], 0]
+            self.rho[col, row] = self.mat_defs_field[self.mat_ids_field[col, row], 1]
+            self.cp[col, row]  = self.mat_defs_field[self.mat_ids_field[col, row], 2]
+            self.D[col, row]   = self.k[col,row]/(self.rho[col,row]*self.cp[col,row])#self.mat_diffs_field[self.mat_ids_field[col, row]]
+            self.mat[col, row] = self.mat_ids_field[col, row]
+
+            # TODO: move to shared fn
+            if col == 0 or row == 0 or col == self.n-1 or row == self.n-1:
+                boundary = 0.0
+                if col == 0 or col == self.n - 1:
+                    boundary = self.boundaries[0, int(col / (self.n-1))]
+                if row == 0 or row == self.n - 1:
+                    boundary = self.boundaries[1, int(row / (self.n-1))]
+                
+                if boundary < 0:
+                    """Adiabatic"""
+                    self.mat[col, row] = ti.cast(-1, ti.i8)
+
+                    self.k[col, row] = 0.000001
+                    self.cp[col, row] = 1.0
+                    self.rho[col, row] = 1.0
+                    self.D[col, row] = 0.0
 
     @ti.kernel
     def populate_D(self, D: float):
-        self.u.fill(self.u_min)
         self.D.fill(D)
-        # # Crucifix thing
-        # for col, row in self.D:
-        #     if col > 5/7 * self.n and col < 6/7*self.n and row > 1/8*self.n and row < 7/8*self.n:
-        #         self.D[col, row] = D / 500.0
-        #     if col > 3/7 * self.n and col < 4/7*self.n and row > 1/8*self.n and row < 7/8*self.n:
-        #         self.D[col, row] = D / 5000.0
-        #     if col > 1/7 * self.n and col < 2/7*self.n and row > 1/8*self.n and row < 7/8*self.n:
-        #         self.D[col, row] = D / 500.0
-        #     if col > 2/7 * self.n and col < 3/7*self.n and row > 3/7*self.n and row < 4/7*self.n:
-        #         self.D[col, row] = D / 5000.0
-        #     if col > 4/7 * self.n and col < 5/7*self.n and row > 3/7*self.n and row < 4/7*self.n:
-        #         self.D[col, row] = D / 5000.0
+
+        for col, row in self.D:
+            if row < 3/8 * self.n:
+                self.mat[col, row] = ti.cast(self.mat_ids['outer'], ti.i8)
+
+                self.k[col, row] = self.mat_defs[self.mat_ids['outer'], 0]
+                self.cp[col, row] = self.mat_defs[self.mat_ids['outer'], 1]
+                self.rho[col, row] = self.mat_defs[self.mat_ids['outer'], 2]
+                self.D[col, row] = self.mat_diffs[self.mat_ids['outer']]
+            elif row < 4/8 * self.n:
+                self.mat[col, row] = ti.cast(self.mat_ids['xps'], ti.i8)
+
+                self.k[col, row] = self.mat_defs[self.mat_ids['xps'], 0]
+                self.cp[col, row] = self.mat_defs[self.mat_ids['xps'], 1]
+                self.rho[col, row] = self.mat_defs[self.mat_ids['xps'], 2]
+                self.D[col, row] = self.mat_diffs[self.mat_ids['xps']]
+            elif row < 5/8 * self.n:
+                self.mat[col, row] = ti.cast(self.mat_ids['concrete'], ti.i8)
+
+                self.k[col, row] = self.mat_defs[self.mat_ids['concrete'], 0]
+                self.cp[col, row] = self.mat_defs[self.mat_ids['concrete'], 1]
+                self.rho[col, row] = self.mat_defs[self.mat_ids['concrete'], 2]
+                self.D[col, row] = self.mat_diffs[self.mat_ids['concrete']]
+            else:
+                self.mat[col, row] = ti.cast(self.mat_ids['outer'], ti.i8)
+
+                self.k[col, row] = self.mat_defs[mat_ids['outer'], 0]
+                self.cp[col, row] = self.mat_defs[self.mat_ids['outer'], 1]
+                self.rho[col, row] = self.mat_defs[self.mat_ids['outer'], 2]
+                self.D[col, row] = self.mat_diffs[self.mat_ids['outer']]
+            if (row >= 3/8*self.n and row <= 5/8*self.n) and ((col > 6/21*self.n and col < 7/21*self.n) or (col > 10/21*self.n and col < 11/21*self.n) or (col > 14/21*self.n and col < 15/21*self.n)):
+                self.mat[col, row] = ti.cast(self.mat_ids['channel'], ti.i8)
+
+                self.k[col, row] = self.mat_defs[self.mat_ids['channel'], 0]
+                self.cp[col, row] = self.mat_defs[self.mat_ids['channel'], 1]
+                self.rho[col, row] = self.mat_defs[self.mat_ids['channel'], 2]
+                self.D[col, row] = self.mat_diffs[self.mat_ids['channel']]
+
+            if col == 0 or row == 0 or col == self.n-1 or row == self.n-1:
+                boundary = 0.0
+                if col == 0 or col == self.n - 1:
+                    boundary = self.boundaries[0, int(col / (self.n-1))]
+                if row == 0 or row == self.n - 1:
+                    boundary = self.boundaries[1, int(row / (self.n-1))]
+                
+                if boundary < 0:
+                    """Adiabatic"""
+                    self.mat[col, row] = ti.cast(-1, ti.i8)
+
+                    self.k[col, row] = 0.000001
+                    self.cp[col, row] = 1.0
+                    self.rho[col, row] = 1.0
+                    self.D[col, row] = 0.0
+
+
+    @ti.kernel
+    def precompute_coeffs(self):
+        # for col, row in self.cv:
+        #     # self.cv[col,row] *= self.dx
+        #     self.k[col, row] /= self.dx
+        #     self.D[col, row] /= self.dx
+        self.k_mid.fill(-1) # -1 on boundaries for now
+        self.k_sum.fill(0)
+        for col, row in self.cv:
+            self.cv[col, row] = self.rho[col, row]*self.cp[col, row]
+            # TODO: should self.dx be mul'd in here?
+            # self.c_cvinv[col, row] = self.dx*self.c/self.cv[col, row]
+            self.c_cvinv[col, row] = self.c/self.cv[col, row]
+            # TODO: migrate to multi-dim final slot for col/row
+            k = self.k[col, row]
+            if col > 0:
+                if col == 1 and self.boundaries[0,0] < 0:
+                    self.k_mid[col, row, 0] = 0 # no heat flow from left into right cell
+                else:
+                    self.k_mid[col, row, 0] = (k + self.k[col - 1, row])/2
+                    self.k_sum[col, row] += self.k_mid[col, row, 0]
+            if col < self.n - 1:
+                if col == self.n-2 and self.boundaries[0,1] < 0:
+                    self.k_mid[col, row, 1] = 0 # no heat flow from right into left cell
+                else: 
+                    self.k_mid[col, row, 1] = (k + self.k[col + 1, row])/2
+                    self.k_sum[col, row] += self.k_mid[col, row, 1]
+            if row > 0:
+                if row == 1 and self.boundaries[1,0] < 0:
+                    self.k_mid[col, row, 2] = 0 # no heat flow from down into up cell
+                else:
+                    self.k_mid[col, row, 2] = (k + self.k[col, row - 1])/2
+                    self.k_sum[col, row] += self.k_mid[col, row, 2]
+            if row < self.n - 1:
+                if row == self.n-2 and self.boundaries[1,1] < 0:
+                    self.k_mid[col, row, 3] = 0 # no heat flow from up into down cell
+                else:
+                    self.k_mid[col, row, 3] = (k + self.k[col, row + 1])/2
+                    self.k_sum[col, row] += self.k_mid[col, row, 3]
+            self.denom[col, row] = 1 / (1 + self.k_sum[col, row]*self.c_cvinv[col, row])
+    @ti.kernel
+    def load_material_colors(self, D_max: float):
+        # TODO: make mat colors assignable
         mat_colors = ti.Matrix(
             [
                 [ti.random(), ti.random(), ti.random()],
@@ -101,64 +275,11 @@ class Solver:
                 [ti.random(), ti.random(), ti.random()]
             ]
         )
+
         for col, row in self.D:
-            if row < 3/8 * self.n:
-                self.D[col, row] = 0.5*D
-
-                self.mat[col, row] = ti.cast(mat_ids['outer'], ti.i8)
-
-                self.k[col, row] = mat_defs[mat_ids['outer'], 0]
-                self.cp[col, row] = mat_defs[mat_ids['outer'], 1]
-                self.rho[col, row] = mat_defs[mat_ids['outer'], 2]
-                # self.D[col, row] = mat_diffs[mat_ids['outer']]
-            elif row < 4/8 * self.n:
-                self.D[col, row] = 0.1*D
-
-                self.mat[col, row] = ti.cast(mat_ids['concrete'], ti.i8)
-
-                self.k[col, row] = mat_defs[mat_ids['concrete'], 0]
-                self.cp[col, row] = mat_defs[mat_ids['concrete'], 1]
-                self.rho[col, row] = mat_defs[mat_ids['concrete'], 2]
-                # self.D[col, row] = mat_diffs[mat_ids['concrete']]
-            elif row < 5/8 * self.n:
-                self.D[col, row] = 0.01*D
-                self.D[col, row] = 0.1*D
-
-                self.mat[col, row] = ti.cast(mat_ids['xps'], ti.i8)
-
-                self.k[col, row] = mat_defs[mat_ids['xps'], 0]
-                self.cp[col, row] = mat_defs[mat_ids['xps'], 1]
-                self.rho[col, row] = mat_defs[mat_ids['xps'], 2]
-                # self.D[col, row] = mat_diffs[mat_ids['xps']]
-            else:
-                self.D[col, row] = 0.5*D
-
-                self.mat[col, row] = ti.cast(mat_ids['outer'], ti.i8)
-
-                self.k[col, row] = mat_defs[mat_ids['outer'], 0]
-                self.cp[col, row] = mat_defs[mat_ids['outer'], 1]
-                self.rho[col, row] = mat_defs[mat_ids['outer'], 2]
-                # self.D[col, row] = mat_diffs[mat_ids['outer']]
-            if (row >= 3/8*self.n and row <= 5/8*self.n) and ((col > 6/21*self.n and col < 7/21*self.n) or (col > 10/21*self.n and col < 11/21*self.n) or (col > 14/21*self.n and col < 15/21*self.n)):
-                self.D[col, row] = D
-
-                self.mat[col, row] = ti.cast(mat_ids['channel'], ti.i8)
-
-                self.k[col, row] = mat_defs[mat_ids['channel'], 0]
-                self.cp[col, row] = mat_defs[mat_ids['channel'], 1]
-                self.rho[col, row] = mat_defs[mat_ids['channel'], 2]
-                # self.D[col, row] = mat_diffs[mat_ids['channel']]
-            gray_scale = (self.D[col, row] - 0.01*D) / (0.99*D)
+            gray_scale = (self.D[col, row] - 0.01*D_max) / (0.99*D_max)
             self.colors[col+self.n, row] = ti.Vector([mat_colors[self.mat[col, row], 0], mat_colors[self.mat[col, row], 1], mat_colors[self.mat[col, row], 2]])
             self.colors[col+self.n,row+self.n] = ti.Vector([gray_scale, gray_scale, gray_scale])
-
-
-        
-        # for col, row in self.mat:
-        #     self.k[col, row] = mat_defs[int(self.mat[col, row]), 0]
-        #     self.cp[col, row] = mat_defs[self.mat[col, row], 1]
-        #     self.rho[col, row] = mat_defs[self.mat[col, row], 2]
-        #     self.D[col, row] = mat_diffs[self.mat[col, row]]
 
     @ti.kernel
     def check_explicit_cfl(self):
@@ -171,6 +292,7 @@ class Solver:
     def explicit_batch(self):
         for i in range(self.updates_per_batch):
             self.explicit_step()
+        self.compute_q()
 
     @ti.kernel
     def explicit_step(self):
@@ -179,29 +301,33 @@ class Solver:
             if col == 0 or row == 0 or col == self.n-1 or row == self.n-1:
                 self.handle_boundary_explicit(col, row)
             else:
-                self.handle_internal_explicit(col, row)
-        ti.sync()
+                self.handle_internal_jacobi(col, row)
+        # ti.sync()
 
         """Shift"""
         for node in ti.grouped(self.u_next):
             self.u[node] = self.u_next[node]
-        ti.sync()
+        # ti.sync()
 
-        """Compute U"""
+    @ti.kernel
+    def compute_q(self):
+        """Compute Q"""
         self.q.fill(0.0)
         for col, row in self.u:
             hor = 0.0
             ver = 0.0
             # TODO: handle min/max
             if col > 0:
-                hor += (self.u[col, row] - self.u[col - 1, row])/self.dx * (self.D[col, row] + self.D[col - 1, row])/2
+                hor += (self.u[col, row] - self.u[col - 1, row]) * (self.k[col, row] + self.k[col - 1, row])/2
             if col < self.n - 1:
-                hor += (self.u[col + 1, row] - self.u[col, row])/self.dx * (self.D[col, row] + self.D[col + 1, row])/2
+                hor += (self.u[col + 1, row] - self.u[col, row]) * (self.k[col, row] + self.k[col + 1, row])/2
             if row > 0:
-                ver += (self.u[col, row] - self.u[col, row - 1])/self.dx * (self.D[col, row] + self.D[col, row - 1])/2
+                ver += (self.u[col, row] - self.u[col, row - 1]) * (self.k[col, row] + self.k[col, row - 1])/2
             if row < self.n - 1:
-                ver += (self.u[col, row + 1] - self.u[col, row])/self.dx * (self.D[col, row] + self.D[col, row + 1])/2
-            self.q[col, row] = ti.sqrt(0.25*(hor**2 + ver**2))*20000#/50.0
+                ver += (self.u[col, row + 1] - self.u[col, row]) * (self.k[col, row] + self.k[col, row + 1])/2
+            # TODO: precompute some of these consts.
+            # self.q[col, row] = ti.log(ti.sqrt(ti.static(0.25/self.dx**2)*((hor**2 + ver**2))))/ti.static(ti.log(175))
+            self.q[col, row] = ti.sqrt(ti.static(0.25/self.dx**2)*((hor**2 + ver**2)))/175
 
     @ti.func
     def handle_boundary_explicit(self, col, row):
@@ -210,72 +336,42 @@ class Solver:
             if boundary >= 0: # TODO: create a separate flag
                 """Prescriptive"""
                 self.u_next[col, row] = boundary
-            else:
-                """Adiabatic"""
-                mult = 1.0
-                alpha = self.D[col, row]*self.c
-                right = 0.0
-                left = 0.0
-                up = 0.0
-                down = 0.0
-                if col > 0:
-                    left  = self.u[col - 1, row]
-                else:
-                    right = self.u[col + 1, row]
-                if row > 0:
-                    down = self.u[col, row - 1]
-                    mult = mult + 1
-                if row < self.n-1:
-                    up = self.u[col, row + 1]
-                    mult = mult = mult + 1
-                self.u_next[col, row] = (1 - mult*alpha) * self.u[col, row] + alpha * (left + right + up + down)
         else:
             boundary = self.boundaries[1, int(row / (self.n-1))]
             if boundary >= 0: # TODO: create a separate flag
                 """Prescriptive"""
                 self.u_next[col, row] = boundary
-            else:
-                """Adiabatic"""
-                mult = 1.0
-                alpha = self.D[col, row]*self.c
-                right = 0.0
-                left = 0.0
-                up = 0.0
-                down = 0.0
-                if row > 0:
-                    down = self.u[col, row - 1]
-                else:
-                    up = self.u[col, row + 1]
-                if col > 0:
-                    left = self.u[col - 1, row]
-                    mult = mult + 1
-                if col < self.n-1:
-                    right = self.u[col + 1, row]
-                    mult = mult = mult + 1
-                self.u_next[col, row] = (1 - mult*alpha) * self.u[col, row] + alpha * (left + right + up + down)
     @ti.func 
-    def handle_internal_explicit(self, col, row):
-        D = self.D[col, row]
-        left  = self.u[col - 1, row]
-        right = self.u[col + 1, row]
-        down  = self.u[col, row - 1]
-        up    = self.u[col, row + 1]
-        # alpha = self.D[col, row]*self.c
-        # TODO: is the /2 necessary?
-        alpha_l = self.c*(self.D[col - 1, row] + D)/2
-        alpha_r = self.c*(self.D[col + 1, row] + D)/2
-        alpha_d = self.c*(self.D[col, row - 1] + D)/2
-        alpha_u = self.c*(self.D[col, row + 1] + D)/2
-        alpha_l = self.c*(self.D[col - 1, row] + D)
-        alpha_r = self.c*(self.D[col + 1, row] + D)
-        alpha_d = self.c*(self.D[col, row - 1] + D)
-        alpha_u = self.c*(self.D[col, row + 1] + D)
-        alpha = alpha_l + alpha_r + alpha_d + alpha_u
+    def handle_internal_jacobi(self, col, row):
+        # k = self.k[col, row]
+        # # # TODO: Move these static computations into a precomputed field
+        # alpha_l = (self.k[col - 1, row] + k)/2
+        # alpha_r = (self.k[col + 1, row] + k)/2
+        # alpha_d = (self.k[col, row - 1] + k)/2
+        # alpha_u = (self.k[col, row + 1] + k)/2
+        k_l = self.k_mid[col, row, 0]
+        k_r = self.k_mid[col, row, 1]
+        k_d = self.k_mid[col, row, 2]
+        k_u = self.k_mid[col, row, 3]
 
+        # alpha = alpha_l + alpha_r + alpha_d + alpha_u
+        # k = self.k_sum[col, row]
+        hcp = self.c_cvinv[col, row] #self.c / (self.cv[col, row])
+        denom = self.denom[col, row] # 1 + k*hcp
 
-        # self.u_next[col, row] = (1 - 4*alpha) * self.u[col, row] + alpha * (left + right + up + down)
-        self.u_next[col, row] = (1 - alpha) * self.u[col, row] + alpha_l*left + alpha_r*right + alpha_d*down + alpha_u*up
-        self.u_next[col, row] = (1 - alpha) * self.u[col, row] + alpha_l*left + alpha_r*right + alpha_d*down + alpha_u*up
+        err = 9999.0
+
+        while err > self.tol:
+            self.u_tmp[col, row] = (
+                self.u[col,row] + (
+                      k_l * self.u_next[col-1, row]\
+                    + k_r * self.u_next[col+1, row]\
+                    + k_d * self.u_next[col, row-1]\
+                    + k_u * self.u_next[col, row+1]
+                ) * hcp
+            ) * denom
+            err = ti.abs(self.u_tmp[col, row] - self.u_next[col, row])
+            self.u_next[col, row] = self.u_tmp[col, row]
         
     def benchmark_explicit(self, n_tests):
         print("Starting benchmark...")
@@ -329,22 +425,134 @@ class Solver:
             self.colors[i,j+self.n].x = ti.cast((self.colormap_field[level_idx].x * (1-colorphase) + colorphase*self.colormap_field[level_idx+1].x)/255, ti.float32)
             self.colors[i,j+self.n].y = ti.cast((self.colormap_field[level_idx].y * (1-colorphase) + colorphase*self.colormap_field[level_idx+1].y)/255, ti.float32)
             self.colors[i,j+self.n].z = ti.cast((self.colormap_field[level_idx].z * (1-colorphase) + colorphase*self.colormap_field[level_idx+1].z)/255, ti.float32)
+    
+    def plot_isotherms(self):
+        plt.cla()
+        u = self.u.to_numpy()
+        u_col = self.colors.to_numpy()[:self.n,:self.n]
+        plt.imshow(np.clip(np.swapaxes(u_col, 0,1), 0, 1.0))
+        plt.contour(self.X, self.Y, np.swapaxes(u,0,1), colors='black', levels=np.arange(273.15 -5,273.15+21,0.2), linewidths=(1, 0.25, 0.25, 0.25, 0.25))#, linewidths=(0.25, 0.25, 0.25, 1)), linewidths=(0.25, 0.25, 0.25, 0.25, 1))
 
+        ax = plt.gca()
+        ax.invert_yaxis()
+        plt.axis("off")
+        plt.draw()
+        plt.pause(0.01)
 
+    @ti.kernel
+    def init_mesh_vertices(self):
+        for i,j in ti.ndrange(self.n,self.n):
+            self.vertices[i+self.n*j].x = ti.cast(i/(self.n-1)*self.mesh_render_size-self.mesh_render_size/2, ti.float32)
+            self.vertices[i+self.n*j].y = ti.cast(0.0, ti.float32)
+            self.vertices[i+self.n*j].z = ti.cast(j/(self.n-1)*self.mesh_render_size-self.mesh_render_size/2, ti.float32)
 
+    @ti.kernel
+    def init_mesh_indices(self):
+        for i, j in ti.ndrange(self.n- 1, self.n- 1):
+                quad_id = (i * (self.n- 1)) + j
+                # First triangle of the square
+                self.indices[quad_id * 6 + 0] = i * self.n+ j
+                self.indices[quad_id * 6 + 1] = (i + 1) * self.n+ j
+                self.indices[quad_id * 6 + 2] = i * self.n+ (j + 1)
+                # Second triangle of the square
+                self.indices[quad_id * 6 + 3] = (i + 1) * self.n+ j + 1
+                self.indices[quad_id * 6 + 4] = i * self.n+ (j + 1)
+                self.indices[quad_id * 6 + 5] = (i + 1) * self.n+ j
 
+    @ti.kernel
+    def update_mesh_vertices(self):
+        for i,j in self.u:
+
+            h = ti.cast(self.u[i,j] - self.u_min, ti.float32)/self.u_range
+            # TODO: more elegant boundary checks, and set adaibatic temp elsewhere?
+            if i == 0 or j == 0 or i == self.n-1 or j == self.n-1: # i is col, j is row
+                if i == 0 or i == self.n - 1:
+                    boundary = self.boundaries[0, int(i / (self.n-1))]
+                    if boundary < 0: # TODO: create a separate flag
+                        """Adiabatic"""
+                        if i == 0:
+                            h = self.u[i+1,j]
+                        else:
+                            h = self.u[i-1,j]
+                        h = ti.cast(h - self.u_min, ti.float32)/self.u_range
+                else:
+                    boundary = self.boundaries[1, int(j / (self.n-1))]
+                    if boundary < 0: # TODO: create a separate flag
+                        """Adiabatic"""
+                        if j == 0:
+                            h = self.u[i,j+1]
+                        else:
+                            h = self.u[i,j-1]
+                        h = ti.cast(h - self.u_min, ti.float32)/self.u_range
+
+            self.vertices[i+self.n*j].y = h*self.mesh_height
+            
+            level = ti.max(ti.min(ti.floor(h*(self.colormap_field.shape[0]-1)),self.colormap_field.shape[0]-2), 0)
+            colorphase = ti.cast(ti.min(ti.max(h*(self.colormap_field.shape[0]-1) - level, 0),1), ti.f32)
+            level_idx = ti.cast(level, dtype=int)
+
+            self.mesh_colors[i+self.n*j].x = ti.cast((self.colormap_field[level_idx].x * (1-colorphase) + colorphase*self.colormap_field[level_idx+1].x)/255, ti.float32)
+            self.mesh_colors[i+self.n*j].y = ti.cast((self.colormap_field[level_idx].y * (1-colorphase) + colorphase*self.colormap_field[level_idx+1].y)/255, ti.float32)
+            self.mesh_colors[i+self.n*j].z = ti.cast((self.colormap_field[level_idx].z * (1-colorphase) + colorphase*self.colormap_field[level_idx+1].z)/255, ti.float32)
 
 if __name__ == '__main__':
+
+    USE_MESH=False
+    USE_MATS=True
+    PLOT_ISO=True
+    """
+    Material Defs
+    K [W/mK], Cp [J/kgK], rho [kg/m3]
+    """
+
+    print(f"--- Material Library ---")
+    mat_names = [
+        "outer",
+        "channel",
+        "concrete",
+        "xps"
+    ]
+    if USE_MATS:
+        mat_defs = np.array([
+            [3, 100, 100], 
+            [6, 100, 100],
+            [2.3, 1000, 2300], 
+            [0.039, 1450, 35],
+        ])
+    else:
+        mat_defs = np.array([
+            [0.1, 100, 1000], 
+            [0.1, 100, 1000],
+            [0.1, 100, 1000], 
+            [0.1, 100, 1000], 
+        ])
+    mat_diffs = mat_defs[:,0]/(mat_defs[:,1]*mat_defs[:,2])
+    mat_ids = {
+        name: i for i,name in enumerate(mat_names)
+    }
+    for name,mat_id in mat_ids.items():
+        print(f"\nMaterial: {name}")
+        print(f"k:   {mat_defs[mat_id, 0]:0.2f} [W/mK]")
+        print(f"Cp:  { int(mat_defs[mat_id, 1]):04d} [J/kgK]")
+        print(f"rho: { int(mat_defs[mat_id, 2]):04d} [kg/m3]")
+        print(f"D:   {  mat_diffs[mat_id]:0.3e} [m2/s]")
+
     ti.init(arch=ti.cuda, default_fp=ti.f32)
-    D = 0.000002 # [m2/s]
+    D = np.max(mat_diffs) # [m2/s]
     dx = 0.01 # [m]
-    dt = dx**2 / (4*D*2) # [s]
-    print(dt)
+    # dt = dx**2 / (4*D) # [s]
+    dt = 1 # [s]
+    print(f"Timestep: {int(dt*1000):01d}ms")
     p = 8
     n = 2**p
 
+    u_range = 25
+    u_min = 273.15 + (-5)
+
     boundary_values = [
-        [-1, -1],
+        # [-1, -1],
+        # [-1, -1]
+        [1, 1],
         [1, 0]
     ]
 
@@ -356,48 +564,64 @@ if __name__ == '__main__':
         [244,109,69],
         [169,23,69]
     ]
-    jet = plt.cm.get_cmap("jet")
+    jet = plt.colormaps["jet"]
     colormap = jet(np.arange(jet.N))*255
 
 
-
-
-    u_range = 25
-    u_min = 273.15 + (-5)
-
-    solver = Solver(dt, dx, n, D, boundary_values, colormap, u_min, u_range, updates_per_batch=100)
-    solver.check_explicit_cfl()
+    solver = Solver(dt, dx, n, D, mat_ids, mat_defs, mat_diffs, boundary_values, colormap, u_min, u_range, updates_per_batch=100)
+    # solver.check_explicit_cfl()
     # solver.benchmark_explicit(n_tests=100)
 
     """
     Render setup
     """
     window_scale_factor = 2
-    window = ti.ui.Window("2D Diffusion", (window_scale_factor*2*n,window_scale_factor*2*n))
+    window = ti.ui.Window("2D Diffusion", (int(window_scale_factor*2*n),int(window_scale_factor*2*n)))
     canvas = window.get_canvas()
+    scene = ti.ui.Scene()
+    camera = ti.ui.Camera()
+    # camera.position(8, 4, 0)
+    # camera.up(1,0,0)
+    camera.position(0, 8, 0)
+    camera.lookat(0,0,0)
+    camera.up(0,1,0)
+    camera_radius = 6
+    camera_height = 6
+    camera_speed = 0.02
+    camera_t = 0
+    if USE_MESH:
+        solver.init_mesh_vertices()
+        solver.init_mesh_indices()
+        solver.update_mesh_vertices()
 
     it = 0
+    t_marker = 1
     
-    fig = plt.figure()
-    X, Y = np.meshgrid(np.arange(solver.n), np.arange(solver.n), indexing="xy")
     while window.running:
 
-        solver.update_colors()
-        canvas.set_image(solver.colors)
+        if USE_MESH:
+            camera_t += camera_speed
+            camera.position(camera_radius*ti.sin(camera_t), camera_height, camera_radius*ti.cos(camera_t))
+            # camera.track_user_inputs(window, movement_speed=0.2, hold_key=ti.ui.RMB)
+            scene.set_camera(camera)
+            scene.ambient_light((0.8, 0.8, 0.8))
+            scene.point_light(pos=(0.0, 4.5, 0.0), color=(0.2, 0.2, 0.2))
+
+            solver.update_mesh_vertices()
+            scene.mesh(solver.vertices, solver.indices, per_vertex_color=solver.mesh_colors)
+            canvas.scene(scene)
+        else:
+            solver.update_colors()
+            canvas.set_image(solver.colors)
 
         solver.explicit_batch()
         # window.save_image(f"./week_5_fd_pde/images_4/{it:05d}.png")
-        if it%200 == 0:
-            plt.cla()
-            u = solver.u.to_numpy()
-            u_col = solver.colors.to_numpy()[:solver.n,:solver.n]
-            plt.imshow(np.clip(np.swapaxes(u_col, 0,1), 0, 1.0))
-            plt.contour(X, Y, np.swapaxes(u,0,1), colors='black', levels=np.arange(273.15 -6,273.15+21,0.25), linewidths=(0.25, 0.25, 0.25, 0.25, 1))
-            ax = plt.gca()
-            ax.invert_yaxis()
-            plt.axis("off")
-            plt.draw()
-            plt.pause(0.01)
+        
+        if it*solver.updates_per_batch*solver.dt % (3600) == 0 and PLOT_ISO==True:
+            solver.plot_isotherms()
+        if it*solver.updates_per_batch*solver.dt/(3600*24) > t_marker:
+            print(f"Completed day {t_marker}")
+            t_marker +=1
 
         it += 1
         window.show()

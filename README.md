@@ -20,4 +20,4 @@ Currently working on accelerated Lattice Boltzmann Method (LBM) solvers which co
 
 ## Integration with CAD
 
-(NOT YET IMPLEMENTED) connection to Rhino/Grasshopper through websockets or HTTP requests
+The scripts in this repo can be connected to the Rhinoceros/Grasshopper modeling environmen.  Currently, only the heat diffusion FDM script is configured.  Run `webserver.py` in `/fdm` to try it out.  Rhino and Grasshopper demo files are provided for reference.
