@@ -53,6 +53,20 @@ class PINNSSSBeam:
         self.end_ix = self.geo_params_start_ix + self.geo_params_ct
         self.force_start_ix = self.end_ix  # TODO: placeholder
 
+        self.a_min = -0.2
+        self.a_max = 0.2
+        self.a_range = self.a_max - self.a_min
+
+        # self.b0 = 0.8
+        # self.h0_min = 0.25
+        # self.b1_min = 0.33
+        # self.h1_min = 0.5
+
+        self.b0 = 10
+        self.h0_min = 1
+        self.b1_min = 2
+        self.h1_min = 3
+
         self.collocation_ct = collocation_ct
         self.bc_ct = bc_ct
         self.adaptive_resample = adaptive_resample
@@ -74,6 +88,7 @@ class PINNSSSBeam:
         # self.I = 1
         # self.I_fn = lambda pts: -(pts[:,0:1])*(pts[:,1:2]-self.s_min)*(pts[:,1:2]-self.s_max) + 1
         self.E = 0.2
+        self.E = 1
         # self.force_fn = lambda pts: 1/(0.1*np.sqrt(2*np.pi)) * torch.exp(-0.5*(pts**2)/(0.1**2))
         # self.force_fn = lambda pts: -1/(0.1*np.sqrt(2*np.pi)) * torch.exp(-0.5*(pts**2)/(0.1**2))
         # self.force_fn = lambda pts: -3 * torch.sigmoid((pts-0.5)*30)
@@ -126,9 +141,9 @@ class PINNSSSBeam:
             old_a_h0 = self.render_a_h0
             old_a_b1 = self.render_a_b1
             old_a_h1 = self.render_a_h1
-            self.render_a_h0 = window.slider_float("Top Height Curvature", self.render_a_h0, -0.2, 0.2)
-            self.render_a_b1 = window.slider_float("Bottom Width Curvature", self.render_a_b1, -0.2, 0.2)
-            self.render_a_h1 = window.slider_float("Bottom Height Curvature", self.render_a_h1, -0.2, 0.2)
+            self.render_a_h0 = window.slider_float("Top Height Curvature", self.render_a_h0, self.a_min,  self.a_max)
+            self.render_a_b1 = window.slider_float("Bottom Width Curvature", self.render_a_b1, self.a_min,  self.a_max)
+            self.render_a_h1 = window.slider_float("Bottom Height Curvature", self.render_a_h1, self.a_min,  self.a_max)
             if self.render_a_h0 != old_a_h0 or self.render_a_b1 != old_a_b1 or self.render_a_h1 != old_a_h1: 
                 self.update_mesh_yz_vals(self.render_a_h0, 0, self.render_a_b1, 0, self.render_a_h1, 0)
         
@@ -152,10 +167,15 @@ class PINNSSSBeam:
     @ti.kernel
     def update_mesh_yz_vals(self, a_h0: float, c_h0: float, a_b1: float, c_b1: float, a_h1: float, c_h1: float):
         # y is up
-        b0 = 0.8
-        h0_min = 0.25
-        b1_min = 0.25
-        h1_min = 0.5
+        # b0 = 0.8
+        # h0_min = 0.25
+        # b1_min = 0.25
+        # h1_min = 0.5
+        b0 = self.b0
+        h0_min = self.h0_min
+        b1_min = self.b1_min
+        h1_min = self.h1_min
+
         for i in range(self.mesh_pts_per_edge):
             x = self.mesh_x[i]
 
@@ -284,11 +304,7 @@ class PINNSSSBeam:
             self.camera_radius * ti.cos(self.camera_t),
         )
         self.scene.set_camera(self.camera)
-        # self.scene.ambient_light((1.0, 1.0, 1.0))
         self.scene.point_light(pos=(self.light_x, self.light_y, self.light_z), color=(1,1,1))
-        # self.scene.point_light(pos=(0.0, -4.5, 0.5), color=(0.4, 0.4, 0.4))
-        # self.scene.point_light(pos=(0.0, 4.5, 0.0), color=(0.4, 0.4, 0.4))
-
         self.scene.mesh(self.mesh_pts, self.mesh_indices, color=(0.5, 0.2, 0.8), two_sided=True)
         self.canvas.scene(self.scene)
         self.window.show()
@@ -314,10 +330,14 @@ class PINNSSSBeam:
 
     def compute_I(self, x, parameters):
         # TODO: consider better vectorization
-        h0_min = 1  # self.h0_min
-        b1_min = 2  # self.b1_min
-        h1_min = 3  # self.h1_min
-        b0 = 10
+        # b0 = 10
+        # h0_min = 1  # self.h0_min
+        # b1_min = 2  # self.b1_min
+        # h1_min = 3  # self.h1_min
+        b0 = self.b0
+        h0_min = self.h0_min
+        b1_min = self.b1_min
+        h1_min = self.h1_min
 
         a_h0 = parameters[:, 0:1]
         c_h0 = parameters[:, 1:2]
@@ -350,6 +370,10 @@ class PINNSSSBeam:
         d1 = com_vert_1 - coms
         i_true = i_baseline_0 + area0 * d0**2 + i_baseline_1 + area1 * d1**2
 
+        # print("area0", f"{torch.min(area0).item():0.3f}", f"{torch.max(area0).item():0.3f}")
+        # print("area1", f"{torch.min(area1).item():0.3f}", f"{torch.max(area1).item():0.3f}")
+        # print("i", f"{torch.min(i_true).item():0.3f}", f"{torch.max(i_true).item():0.3f}")
+
         return {
             "I": i_true,
             "h0": h0,
@@ -364,7 +388,8 @@ class PINNSSSBeam:
         x = x_rand * self.s_range + self.s_min
         geo_params = torch.empty_like(geo_params_rand)
         geo_params[:, 0::2] = (
-            geo_params_rand[:, 0::2] * 1 - 0.5
+            # geo_params_rand[:, 0::2] * 1 - 0.5
+            geo_params_rand[:, 0::2] * self.a_range + self.a_min
         )  # TODO: parameterize these and check bounds - no negs allowed!!
         geo_params[:, 1::2] = geo_params_rand[:, 1::2] * 0 - 0
         pts = torch.hstack([x, geo_params])
@@ -527,13 +552,17 @@ class PINNSSSBeam:
             )
 
         if self.it % self.plot_frequency == 0:
-            n_pts = 1000
+            for i in range(500):
+            # while pinn.window.running:
+                self.handle_gui()
+                self.render_scene()
+            n_pts = self.mesh_pts_per_edge
             n_alphas = 1
             x = torch.linspace(self.s_min, self.s_max, n_pts, device=device).reshape(
                 -1, 1
             )
             geo_params = torch.tile(
-                torch.Tensor([0.3, 0, 0.3, 0, 0.3, 0]).to(device), (n_pts, 1)
+                torch.Tensor([self.render_a_h0, 0, self.render_a_b1, 0, self.render_a_h1, 0]).to(device), (n_pts, 1)
             )
             pts = torch.hstack([x, geo_params])
             pts_flat = pts.reshape(-1, 7)
@@ -657,13 +686,13 @@ if __name__ == "__main__":
         model_prefix=MODEL_PREFIX,
     )
 
-    # for i in range(3000):
-    while pinn.window.running:
+    for i in range(10):
+    # while pinn.window.running:
         pinn.handle_gui()
         pinn.render_scene()
 
     # for i in range(10):
-    for i in range(0):
+    for i in range(10):
         print(f"MetaEpoch: {i}")
         if i == 0:
             pinn.adam.param_groups[0]["lr"] = 1e-3
@@ -678,7 +707,7 @@ if __name__ == "__main__":
         pinn.train(
             n_epochs=1000,
             reporting_frequency=100,
-            plot_frequency=100,
+            plot_frequency=20,
             phys_weight=1,
             bc_weight=8,
         )
