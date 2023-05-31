@@ -81,6 +81,9 @@ class PINNSSSBeam:
         self.dim = self.loc_ct + self.geo_params_ct
 
         """TI Viz Fields"""
+        self.render_a_h0 = 0
+        self.render_a_b1 = 0
+        self.render_a_h1 = 0
         self.mesh_pts_per_edge = 100
         self.beam_edge_ct = 8
         self.beam_long_face_ct = self.beam_edge_ct
@@ -100,9 +103,10 @@ class PINNSSSBeam:
         self.mesh_indices = ti.field(dtype=int, shape=(self.tri_ct * 3))
         self.init_mesh_indices()
         self.init_mesh_pt_x_vals()
-        self.init_mesh_pt_yz_vals()
+        self.update_mesh_yz_vals(a_h0=0.0,c_h0=0,a_b1=0,c_b1=0,a_h1=0,c_h1=0)
 
         self.window = ti.ui.Window("Shaped Beam", (1000, 1000))
+        self.gui = self.window.get_gui()
         self.canvas = self.window.get_canvas()
         self.scene = ti.ui.Scene()
         self.camera = ti.ui.Camera()
@@ -110,9 +114,25 @@ class PINNSSSBeam:
         self.camera.lookat(0, 0, 0)
         self.camera.up(0, 1, 0)
         self.camera_radius = 6
-        self.camera_height = 6
+        self.camera_height = 0
         self.camera_speed = 0.001
         self.camera_t = 4.5
+    
+    def handle_gui(self):
+        with self.gui.sub_window("Shaped Beam Parameters", x=0.05, y=0.05, width=0.5, height=0.1) as window:
+            old_a_h0 = self.render_a_h0
+            old_a_b1 = self.render_a_b1
+            old_a_h1 = self.render_a_h1
+            self.render_a_h0 = window.slider_float("Top Height Curvature", self.render_a_h0, -1, 1)
+            self.render_a_b1 = window.slider_float("Bottom Width Curvature", self.render_a_b1, -1, 1)
+            self.render_a_h1 = window.slider_float("Bottom Height Curvature", self.render_a_h1, -1, 1)
+            if self.render_a_h0 != old_a_h0 or self.render_a_b1 != old_a_b1 or self.render_a_h1 != old_a_h1: 
+                self.update_mesh_yz_vals(self.render_a_h0, 0, self.render_a_b1, 0, self.render_a_h1, 0)
+        
+        with self.gui.sub_window("Camera Controls", x=0.6, y=0.05, width=0.35, height=0.2) as window:
+            self.camera_speed = window.slider_float("Speed", self.camera_speed, 0, 0.01)
+            self.camera_radius = window.slider_float("Radius", self.camera_radius, 2, 10)
+            self.camera_height = window.slider_float("Height", self.camera_height, -10, 10)
 
     @ti.kernel
     def init_mesh_pt_x_vals(self):
@@ -122,13 +142,20 @@ class PINNSSSBeam:
             self.mesh_pts[i].x = self.mesh_x[offset]
 
     @ti.kernel
-    def init_mesh_pt_yz_vals(self):
+    def update_mesh_yz_vals(self, a_h0: float, c_h0: float, a_b1: float, c_b1: float, a_h1: float, c_h1: float):
         # y is up
         b0 = 0.6
-        h0 = 0.1
-        b1 = 0.1
-        h1 = 0.6
+        h0_min = 0.1
+        b1_min = 0.1
+        h1_min = 0.6
         for i in range(self.mesh_pts_per_edge):
+            x = self.mesh_x[i]
+
+            parabola = (x - self.s_min) * (x - self.s_max)
+            h0 = c_h0 + a_h0 * parabola + h0_min
+            b1 = c_b1 + a_b1 * parabola + b1_min
+            h1 = c_h1 + a_h1 * parabola + h1_min
+
             lower_left_inner = 0 * self.mesh_pts_per_edge + i
             lower_right_inner = 1 * self.mesh_pts_per_edge + i
             middle_right_inner = 2 * self.mesh_pts_per_edge + i
@@ -250,6 +277,8 @@ class PINNSSSBeam:
         )
         self.scene.set_camera(self.camera)
         self.scene.ambient_light((1.0, 1.0, 1.0))
+        # self.scene.point_light(pos=(-0.5, -4.5, 0.5), color=(0.4, 0.4, 0.4))
+        # self.scene.point_light(pos=(0.0, -4.5, 0.5), color=(0.4, 0.4, 0.4))
         self.scene.point_light(pos=(0.0, 4.5, 0.0), color=(0.4, 0.4, 0.4))
 
         self.scene.mesh(self.mesh_pts, self.mesh_indices, color=(0.5, 0.2, 0.8))
@@ -291,13 +320,13 @@ class PINNSSSBeam:
         a_h1 = parameters[:, 4:5]
         c_h1 = parameters[:, 5:6]
 
-        parobola = (x - self.s_min) * (x - self.s_max)
+        parabola = (x - self.s_min) * (x - self.s_max)
 
         b0 = b0
-        h0 = c_h0 + a_h0 * parobola + h0_min
+        h0 = c_h0 + a_h0 * parabola + h0_min
 
-        b1 = c_b1 + a_b1 * parobola + b1_min
-        h1 = c_h1 + a_h1 * parobola + h1_min
+        b1 = c_b1 + a_b1 * parabola + b1_min
+        h1 = c_h1 + a_h1 * parabola + h1_min
 
         area0 = b0 * h0
         area1 = b1 * h1
@@ -620,7 +649,9 @@ if __name__ == "__main__":
         model_prefix=MODEL_PREFIX,
     )
 
+    # for i in range(3000):
     while pinn.window.running:
+        pinn.handle_gui()
         pinn.render_scene()
 
     # for i in range(10):
