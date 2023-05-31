@@ -12,12 +12,14 @@ from tqdm import tqdm
 import plotly.io as pio
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import taichi as ti
 
 from mlp import MLP
 
 device = 'cuda' if torch.cuda.is_available() else 'device'
 print(f"Using {device}")
 
+@ti.data_oriented
 class PINNSSSBeam:
     def __init__(
       self, 
@@ -76,6 +78,150 @@ class PINNSSSBeam:
         # self.force_fn = lambda pts: -3 * torch.sigmoid((pts-0.5)*30)
         self.force_fn = lambda x, force_params: -1 + 0*x
         self.dim = self.loc_ct + self.geo_params_ct
+
+        """TI Viz Fields"""
+        self.mesh_pts_per_edge = 100
+        self.beam_edge_ct = 8
+        self.beam_long_face_ct = self.beam_edge_ct
+        self.tris_per_beam_face = 2*(self.mesh_pts_per_edge-1)
+        self.tri_ct = self.tris_per_beam_face * self.beam_long_face_ct + 2 * (2 + 4) # endcaps
+        self.edge_ct = self.tri_ct * 3 / 2 # every edge is counted twice
+        self.mesh_pts = ti.Vector.field(3, dtype=ti.f32, shape=int(self.beam_edge_ct*self.mesh_pts_per_edge))
+        self.mesh_x = ti.field(dtype=ti.f32, shape=(self.mesh_pts_per_edge))
+        mesh_x = torch.linspace(self.s_min, self.s_max, self.mesh_pts_per_edge, device=device)
+        self.mesh_x.from_torch(mesh_x)
+        self.mesh_indices = ti.field(dtype=int, shape=(self.tri_ct * 3))
+        self.init_mesh_indices()
+        self.init_mesh_pt_x_vals()
+        self.init_mesh_pt_yz_vals()
+
+        self.window = ti.ui.Window("Shaped Beam", (1000,1000))
+        self.canvas = self.window.get_canvas()
+        self.scene = ti.ui.Scene()
+        self.camera = ti.ui.Camera()
+        self.camera.position(0, 8, 0)
+        self.camera.lookat(0,0,0)
+        self.camera.up(0,1,0)
+        self.camera_radius = 6
+        self.camera_height = 6
+        self.camera_speed = 0.001
+        self.camera_t = 4.5
+
+    @ti.kernel
+    def init_mesh_pt_x_vals(self):
+        for i in self.mesh_pts:
+            offset = ti.cast(i%self.mesh_pts_per_edge, int)
+            # self.mesh_pts[i].x = offset / self.mesh_pts_per_edge * 3.0
+            self.mesh_pts[i].x = self.mesh_x[offset]
+    
+    @ti.kernel
+    def init_mesh_pt_yz_vals(self):
+        # y is up
+        b0 = 0.6
+        h0 = 0.1
+        b1 = 0.1
+        h1 = 0.6
+        for i in range(self.mesh_pts_per_edge):
+            lower_left_inner = 0*self.mesh_pts_per_edge + i
+            lower_right_inner = 1*self.mesh_pts_per_edge + i
+            middle_right_inner = 2*self.mesh_pts_per_edge + i
+            middle_right_outer = 3*self.mesh_pts_per_edge + i
+            top_right_outer = 4*self.mesh_pts_per_edge + i
+            top_left_outer = 5*self.mesh_pts_per_edge + i
+            middle_left_outer = 6*self.mesh_pts_per_edge + i
+            middle_left_inner = 7*self.mesh_pts_per_edge + i
+
+            self.mesh_pts[top_left_outer].y = 0.0
+            self.mesh_pts[top_left_outer].z = -b0/2.0
+
+            self.mesh_pts[top_right_outer].y = 0.0
+            self.mesh_pts[top_right_outer].z = b0/2.0
+
+            self.mesh_pts[middle_left_outer].y = -h0
+            self.mesh_pts[middle_left_outer].z = -b0/2.0
+
+            self.mesh_pts[middle_right_outer].y = -h0
+            self.mesh_pts[middle_right_outer].z = b0/2.0
+
+            self.mesh_pts[middle_left_inner].y = -h0
+            self.mesh_pts[middle_left_inner].z = -b1/2.0
+
+            self.mesh_pts[middle_right_inner].y = -h0
+            self.mesh_pts[middle_right_inner].z = b1/2.0
+
+            self.mesh_pts[lower_left_inner].y = -h0-h1
+            self.mesh_pts[lower_left_inner].z = -b1/2.0
+
+            self.mesh_pts[lower_right_inner].y = -h0-h1
+            self.mesh_pts[lower_right_inner].z = b1/2.0
+    
+    @ti.kernel
+    def init_mesh_indices(self):
+        """Long faces"""
+        for face_id,quad_id in ti.ndrange(self.beam_long_face_ct, int(self.tris_per_beam_face/2)):
+            quad_start_pt_ix = (face_id * self.mesh_pts_per_edge + quad_id)
+            quad_adjacent_start_pt_ix = ((face_id + 1) % self.beam_edge_ct) * self.mesh_pts_per_edge + quad_id
+            tri_id_a = face_id * self.tris_per_beam_face*3 + quad_id*6
+            tri_id_b = tri_id_a + 3
+            self.mesh_indices[tri_id_a + 0] = ti.cast(quad_start_pt_ix,int)
+            self.mesh_indices[tri_id_a + 1] = ti.cast(quad_start_pt_ix + 1, int)
+            self.mesh_indices[tri_id_a + 2] = ti.cast(quad_adjacent_start_pt_ix, int)
+            self.mesh_indices[tri_id_b + 0] = ti.cast(quad_start_pt_ix + 1, int)
+            self.mesh_indices[tri_id_b + 1] = ti.cast(quad_adjacent_start_pt_ix, int)
+            self.mesh_indices[tri_id_b + 2] = ti.cast(quad_adjacent_start_pt_ix + 1, int)
+        
+        """End caps"""
+        for i in range(2):
+            lower_left_inner = 0*self.mesh_pts_per_edge + i*(self.mesh_pts_per_edge-1)
+            lower_right_inner = 1*self.mesh_pts_per_edge + i*(self.mesh_pts_per_edge-1)
+            middle_right_inner = 2*self.mesh_pts_per_edge + i*(self.mesh_pts_per_edge-1)
+            middle_right_outer = 3*self.mesh_pts_per_edge + i*(self.mesh_pts_per_edge-1)
+            top_right_outer = 4*self.mesh_pts_per_edge + i*(self.mesh_pts_per_edge-1)
+            top_left_outer = 5*self.mesh_pts_per_edge + i*(self.mesh_pts_per_edge-1)
+            middle_left_outer = 6*self.mesh_pts_per_edge + i*(self.mesh_pts_per_edge-1)
+            middle_left_inner = 7*self.mesh_pts_per_edge + i*(self.mesh_pts_per_edge-1)
+            start_ix = self.tris_per_beam_face * self.beam_long_face_ct * 3 + i*6*3
+
+            # tri 1
+            self.mesh_indices[start_ix + 0] = lower_left_inner
+            self.mesh_indices[start_ix + 1] = lower_right_inner
+            self.mesh_indices[start_ix + 2] = middle_left_inner
+
+            # tri 2
+            self.mesh_indices[start_ix + 3] = lower_right_inner
+            self.mesh_indices[start_ix + 4] = middle_left_inner
+            self.mesh_indices[start_ix + 5] = middle_right_inner
+
+            # tri 3
+            self.mesh_indices[start_ix + 6] = middle_left_outer
+            self.mesh_indices[start_ix + 7] = middle_left_inner
+            self.mesh_indices[start_ix + 8] = top_left_outer
+
+            # tri 4
+            self.mesh_indices[start_ix + 9 ] = middle_left_inner
+            self.mesh_indices[start_ix + 10] = top_left_outer
+            self.mesh_indices[start_ix + 11] = middle_right_inner
+            
+            # tri 5
+            self.mesh_indices[start_ix + 12] = middle_right_inner
+            self.mesh_indices[start_ix + 13] = top_left_outer
+            self.mesh_indices[start_ix + 14] = top_right_outer
+
+            # tri 6
+            self.mesh_indices[start_ix + 15] = middle_right_inner
+            self.mesh_indices[start_ix + 16] = middle_right_outer
+            self.mesh_indices[start_ix + 17] = top_right_outer
+    
+    def render_scene(self):
+        self.camera_t += self.camera_speed
+        self.camera.position(self.camera_radius*ti.sin(self.camera_t), self.camera_height, self.camera_radius*ti.cos(self.camera_t))
+        self.scene.set_camera(self.camera)
+        self.scene.ambient_light((1.0, 1.0, 1.0))
+        self.scene.point_light(pos=(0.0, 4.5, 0.0), color=(0.4, 0.4, 0.4))
+
+        self.scene.mesh(self.mesh_pts,self.mesh_indices, color=(0.5,0.2,0.8))
+        self.canvas.scene(self.scene)
+        self.window.show()
 
     def model_path(self, it):
         return Path(os.path.abspath(os.path.dirname(__file__))) / "models" / f"{self.model_prefix}-{it:05d}.pth"
@@ -370,35 +516,42 @@ class PINNSSSBeam:
     
 if __name__ == "__main__":
 
-  MODEL_PREFIX = "SimplySupportedStaticBeam"
-  ADAPTIVE_SAMPLING = False
-  ADAPTIVE_WEIGHTING = False
-  space_bounds = [-1,1]
-  collocation_ct = 10000 # 5000
-  bc_ct = 5000 # 1000
+    MODEL_PREFIX = "SimplySupportedStaticBeam"
+    ADAPTIVE_SAMPLING = False
+    ADAPTIVE_WEIGHTING = False
+    space_bounds = [-1,1]
+    collocation_ct = 10000 # 5000
+    bc_ct = 5000 # 1000
 
-  pinn = PINNSSSBeam(
-      net=MLP(input_dim=7, output_dim=1, hidden_layer_ct=6,hidden_dim=64, act=F.tanh, learnable_act="SINGLE"), 
-      lr=1e-3,
-      collocation_ct=collocation_ct,
-      bc_ct=bc_ct,
-      space_bounds=space_bounds,
-      adaptive_resample=ADAPTIVE_SAMPLING,
-      soft_adapt_weights=ADAPTIVE_WEIGHTING,
-      model_prefix=MODEL_PREFIX
-  )
+    ti.init(arch=ti.gpu, default_fp=ti.f32)
+    pinn = PINNSSSBeam(
+        net=MLP(input_dim=7, output_dim=1, hidden_layer_ct=6,hidden_dim=64, act=F.tanh, learnable_act="SINGLE"), 
+        lr=1e-3,
+        collocation_ct=collocation_ct,
+        bc_ct=bc_ct,
+        space_bounds=space_bounds,
+        adaptive_resample=ADAPTIVE_SAMPLING,
+        soft_adapt_weights=ADAPTIVE_WEIGHTING,
+        model_prefix=MODEL_PREFIX
+    )
 
-  for i in range(10):
-    print(f"MetaEpoch: {i}")
-    if i == 0:
-        pinn.adam.param_groups[0]["lr"] = 1e-3
-    if i == 1:
-        pinn.adam.param_groups[0]["lr"] = 1e-4
-    if i == 2:
-        pinn.adam.param_groups[0]["lr"] = 5e-5
-    if i == 4:
-        pinn.adam.param_groups[0]["lr"] = 1e-5
-    if i == 6:
-        pinn.adam.param_groups[0]["lr"] = 5e-6
-    pinn.train(n_epochs=1000, reporting_frequency=100, plot_frequency=100, phys_weight=1, bc_weight=8)
-    # pinn.plot_bcs_and_ics(mode='error', ct=5000)
+    while pinn.window.running:
+        pinn.render_scene()
+
+    # for i in range(10):
+    for i in range(0):
+        print(f"MetaEpoch: {i}")
+        if i == 0:
+            pinn.adam.param_groups[0]["lr"] = 1e-3
+        if i == 1:
+            pinn.adam.param_groups[0]["lr"] = 1e-4
+        if i == 2:
+            pinn.adam.param_groups[0]["lr"] = 5e-5
+        if i == 4:
+            pinn.adam.param_groups[0]["lr"] = 1e-5
+        if i == 6:
+            pinn.adam.param_groups[0]["lr"] = 5e-6
+        pinn.train(n_epochs=1000, reporting_frequency=100, plot_frequency=100, phys_weight=1, bc_weight=8)
+        # pinn.plot_bcs_and_ics(mode='error', ct=5000)
+
+
