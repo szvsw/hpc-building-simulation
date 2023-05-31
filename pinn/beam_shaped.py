@@ -19,6 +19,15 @@ from mlp import MLP
 device = "cuda" if torch.cuda.is_available() else "device"
 print(f"Using {device}")
 
+# TODO: normalize spatial inputs and y inputs
+# TODO: parameterize output normalization
+# TODO: integrate force over distance to figure out reaction constraints / consider discont boundaries
+# TODO: implement hard constraints
+# TODO: figure out if moment constraint can be eliminated  
+# TODO: figure out best size of network
+# TODO: figure out best number of points
+# TODO: improve adaptive resampling
+
 
 @ti.data_oriented
 class PINNSSSBeam:
@@ -28,14 +37,15 @@ class PINNSSSBeam:
         lr=1e-4,
         collocation_ct=10000,
         bc_ct=1000,
-        space_bounds=[-1, 1],
+        space_bounds=[-10, 10],
         adaptive_resample=True,
         sample_freq=10,
         soft_adapt_weights=True,
         model_prefix="SimplySupportedStaticBeam",
     ) -> None:
         plt.ion()
-        self.fig, self.axs = plt.subplots(4, 1, figsize=(12, 9))
+        self.n_plots = 5
+        self.fig, self.axs = plt.subplots(self.n_plots, 1, figsize=(12, 9))
         self.net = net.to(device)
         self.loss_fn = nn.MSELoss()
         self.adam = torch.optim.Adam(self.net.parameters(), lr=lr)
@@ -53,18 +63,13 @@ class PINNSSSBeam:
         self.end_ix = self.geo_params_start_ix + self.geo_params_ct
         self.force_start_ix = self.end_ix  # TODO: placeholder
 
-        self.a_min = -0.2
-        self.a_max = 0.2
-        self.a_range = self.a_max - self.a_min
-
-        # self.b0 = 0.8
-        # self.h0_min = 0.25
-        # self.b1_min = 0.33
-        # self.h1_min = 0.5
+        self.y_min = -2*0.3
+        self.y_max = 2*0.3
+        self.y_range = self.y_max - self.y_min
 
         self.b0 = 10
-        self.h0_min = 1
-        self.b1_min = 2
+        self.h0_min = 3
+        self.b1_min = 3
         self.h1_min = 3
 
         self.collocation_ct = collocation_ct
@@ -72,11 +77,12 @@ class PINNSSSBeam:
         self.adaptive_resample = adaptive_resample
         self.sample_freq = sample_freq  # TODO: implement periodic resampling
 
+        self.phys_weight = 1
+        self.moment_weight = 1
+        self.extrude_weight = 1
         self.soft_adapt_weights = soft_adapt_weights
         self.lambda_Temp = 0.1
-        self.losses_prev = torch.Tensor([1, 1]).to(device)
-        self.weight_phys = 1
-        self.weight_bc = 1
+        self.losses_prev = torch.Tensor([1, 1, 1]).to(device)
 
         self.it = 0
         self.reporting_frequency = 100
@@ -85,20 +91,24 @@ class PINNSSSBeam:
         self.best_pde_loss = 9999
         self.model_prefix = model_prefix
 
-        # self.I = 1
-        # self.I_fn = lambda pts: -(pts[:,0:1])*(pts[:,1:2]-self.s_min)*(pts[:,1:2]-self.s_max) + 1
         self.E = 0.2
         self.E = 1
         # self.force_fn = lambda pts: 1/(0.1*np.sqrt(2*np.pi)) * torch.exp(-0.5*(pts**2)/(0.1**2))
         # self.force_fn = lambda pts: -1/(0.1*np.sqrt(2*np.pi)) * torch.exp(-0.5*(pts**2)/(0.1**2))
         # self.force_fn = lambda pts: -3 * torch.sigmoid((pts-0.5)*30)
-        self.force_fn = lambda x, force_params: -1 + 0 * x
+        self.force_fn = lambda x, force_params: 0.15 + 0 * x
         self.dim = self.loc_ct + self.geo_params_ct
 
+        """Viz/Plot Controls"""
+        self.render_y0_0 = 0
+        self.render_y1_0 = 0
+        self.render_y0_1 = 0
+        self.render_y1_1 = 0
+        self.render_y0_2 = 0
+        self.render_y1_2 = 0
+        self.render_y_all = 0
         """TI Viz Fields"""
-        self.render_a_h0 = 0
-        self.render_a_b1 = 0
-        self.render_a_h1 = 0
+
         self.mesh_pts_per_edge = 1000
         self.beam_edge_ct = 8
         self.beam_long_face_ct = self.beam_edge_ct
@@ -110,15 +120,20 @@ class PINNSSSBeam:
         self.mesh_pts = ti.Vector.field(
             3, dtype=ti.f32, shape=int(self.beam_edge_ct * self.mesh_pts_per_edge)
         )
+        self.mesh_colors = ti.Vector.field(
+            3, dtype=ti.f32, shape=int(self.beam_edge_ct * self.mesh_pts_per_edge)
+        )
         self.mesh_x = ti.field(dtype=ti.f32, shape=(self.mesh_pts_per_edge))
+        self.mesh_d = ti.field(dtype=ti.f32, shape=(self.mesh_pts_per_edge))
         mesh_x = torch.linspace(
             self.s_min, self.s_max, self.mesh_pts_per_edge, device=device
         )
+        self.mesh_x_torch = mesh_x
         self.mesh_x.from_torch(mesh_x)
         self.mesh_indices = ti.field(dtype=int, shape=(self.tri_ct * 3))
         self.init_mesh_indices()
         self.init_mesh_pt_x_vals()
-        self.update_mesh_yz_vals(a_h0=0.0,c_h0=0,a_b1=0,c_b1=0,a_h1=0,c_h1=0)
+        self.update_mesh_yz_vals(y0_0=0, y1_0=0, y0_1=0, y1_1=0, y0_2=0, y1_2=0)
 
         self.window = ti.ui.Window("Shaped Beam", (1000, 1000))
         self.gui = self.window.get_gui()
@@ -128,7 +143,7 @@ class PINNSSSBeam:
         self.camera.position(0, 8, 0)
         self.camera.lookat(0, 0, 0)
         self.camera.up(0, 1, 0)
-        self.camera_radius = 3.3
+        self.camera_radius = 35
         self.camera_height = 0
         self.camera_speed = 0.001
         self.camera_t = 4.5
@@ -137,20 +152,58 @@ class PINNSSSBeam:
         self.light_z = 0
     
     def handle_gui(self):
-        with self.gui.sub_window("Shaped Beam Parameters", x=0.05, y=0.05, width=0.5, height=0.1) as window:
-            old_a_h0 = self.render_a_h0
-            old_a_b1 = self.render_a_b1
-            old_a_h1 = self.render_a_h1
-            self.render_a_h0 = window.slider_float("Top Height Curvature", self.render_a_h0, self.a_min,  self.a_max)
-            self.render_a_b1 = window.slider_float("Bottom Width Curvature", self.render_a_b1, self.a_min,  self.a_max)
-            self.render_a_h1 = window.slider_float("Bottom Height Curvature", self.render_a_h1, self.a_min,  self.a_max)
-            if self.render_a_h0 != old_a_h0 or self.render_a_b1 != old_a_b1 or self.render_a_h1 != old_a_h1: 
-                self.update_mesh_yz_vals(self.render_a_h0, 0, self.render_a_b1, 0, self.render_a_h1, 0)
+        with self.gui.sub_window("Shaped Beam Parameters", x=0.05, y=0.05, width=0.5, height=0.22) as window:
+            old_y0_0 = self.render_y0_0
+            old_y1_0 = self.render_y1_0
+            old_y0_1 = self.render_y0_1
+            old_y1_1 = self.render_y1_1
+            old_y0_2 = self.render_y0_2
+            old_y1_2 = self.render_y1_2
+            old_y_all = self.render_y_all
+            self.render_y0_0 = window.slider_float("Top Height Vertex", self.render_y0_0, self.y_min, self.y_max)
+            self.render_y1_0 = window.slider_float("Top Height Edge", self.render_y1_0, self.y_min, self.y_max)
+            self.render_y0_1 = window.slider_float("Bottom Width Vertex", self.render_y0_1, self.y_min, self.y_max)
+            self.render_y1_1 = window.slider_float("Bottom Width Edge", self.render_y1_1, self.y_min, self.y_max)
+            self.render_y0_2 = window.slider_float("Bottom Height Vertex", self.render_y0_2, self.y_min, self.y_max)
+            self.render_y1_2 = window.slider_float("Bottom Height Edge", self.render_y1_2, self.y_min, self.y_max)
+            self.render_y_all = window.slider_float("All", self.render_y_all, self.y_min, self.y_max)
+            randomize = window.button("Randomize")
+            if old_y_all != self.render_y_all:
+                self.render_y0_0 = self.render_y_all
+                self.render_y1_0 = self.render_y_all
+                self.render_y0_1 = self.render_y_all
+                self.render_y1_1 = self.render_y_all
+                self.render_y0_2 = self.render_y_all
+                self.render_y1_2 = self.render_y_all
+            if randomize:
+                self.render_y0_0 = torch.rand(1).item()*self.y_range + self.y_min
+                self.render_y1_0 = torch.rand(1).item()*self.y_range + self.y_min
+                self.render_y0_1 = torch.rand(1).item()*self.y_range + self.y_min
+                self.render_y1_1 = torch.rand(1).item()*self.y_range + self.y_min
+                self.render_y0_2 = torch.rand(1).item()*self.y_range + self.y_min
+                self.render_y1_2 = torch.rand(1).item()*self.y_range + self.y_min
+            if (
+                (self.render_y0_0 != old_y0_0) or 
+                (self.render_y1_0 != old_y1_0) or 
+                (self.render_y0_1 != old_y0_1) or 
+                (self.render_y1_1 != old_y1_1) or 
+                (self.render_y0_2 != old_y0_2) or 
+                (self.render_y1_2 != old_y1_2)
+            ):
+                self.update_mesh_yz_vals(
+                    y0_0=self.render_y0_0, 
+                    y1_0=self.render_y1_0,
+                    y0_1=self.render_y0_1, 
+                    y1_1=self.render_y1_1,
+                    y0_2=self.render_y0_2, 
+                    y1_2=self.render_y1_2,
+                )
+                self.plot()
         
         with self.gui.sub_window("Camera Controls", x=0.6, y=0.05, width=0.35, height=0.1) as window:
             self.camera_speed = window.slider_float("Speed", self.camera_speed, 0, 0.01)
-            self.camera_radius = window.slider_float("Radius", self.camera_radius, 0.5, 10)
-            self.camera_height = window.slider_float("Height", self.camera_height, -3.5, 3.5)
+            self.camera_radius = window.slider_float("Radius", self.camera_radius, 15, 50)
+            self.camera_height = window.slider_float("Height", self.camera_height, -10, 10)
 
         with self.gui.sub_window("Light Controls", x=0.6, y=0.85, width=0.35, height=0.1) as window:
             self.light_x = window.slider_float("X", self.light_x, -5,5)
@@ -161,16 +214,33 @@ class PINNSSSBeam:
     def init_mesh_pt_x_vals(self):
         for i in self.mesh_pts:
             offset = ti.cast(i % self.mesh_pts_per_edge, int)
-            # self.mesh_pts[i].x = offset / self.mesh_pts_per_edge * 3.0
             self.mesh_pts[i].x = self.mesh_x[offset]
 
     @ti.kernel
-    def update_mesh_yz_vals(self, a_h0: float, c_h0: float, a_b1: float, c_b1: float, a_h1: float, c_h1: float):
+    def update_mesh_colors(self):
+        for edge_id, pt_id in ti.ndrange(int(self.beam_edge_ct), int(self.mesh_pts_per_edge)):
+            color_ix = ti.cast(edge_id * self.mesh_pts_per_edge + pt_id, int)
+            d = self.mesh_d[pt_id]
+            d_rescaled = 1-d / 7.0
+            color_r = 1.0
+            color_gb = ti.min(ti.max(0.0, d_rescaled), 1.0)
+            
+            self.mesh_colors[color_ix].x = color_r
+            self.mesh_colors[color_ix].y = color_gb
+            self.mesh_colors[color_ix].b = color_gb
+
+    @ti.kernel
+    def update_mesh_yz_vals(
+        self, 
+        y0_0: float, 
+        y1_0: float, 
+        y0_1: float, 
+        y1_1: float, 
+        y0_2: float, 
+        y1_2: float
+    ):
         # y is up
-        # b0 = 0.8
-        # h0_min = 0.25
-        # b1_min = 0.25
-        # h1_min = 0.5
+        l2 = (self.s_range/2)**2
         b0 = self.b0
         h0_min = self.h0_min
         b1_min = self.b1_min
@@ -179,10 +249,11 @@ class PINNSSSBeam:
         for i in range(self.mesh_pts_per_edge):
             x = self.mesh_x[i]
 
-            parabola = (x - self.s_min) * (x - self.s_max)
-            h0 = c_h0 + a_h0 * parabola + h0_min
-            b1 = c_b1 + a_b1 * parabola + b1_min
-            h1 = c_h1 + a_h1 * parabola + h1_min
+            parabola = x**2
+            b0 = b0
+            h0 = h0_min + (y1_0-y0_0) / l2 * parabola + y0_0
+            b1 = b1_min + (y1_1-y0_1) / l2 * parabola + y0_1
+            h1 = h1_min + (y1_2-y0_2) / l2 * parabola + y0_2
 
             lower_left_inner = 0 * self.mesh_pts_per_edge + i
             lower_right_inner = 1 * self.mesh_pts_per_edge + i
@@ -305,7 +376,7 @@ class PINNSSSBeam:
         )
         self.scene.set_camera(self.camera)
         self.scene.point_light(pos=(self.light_x, self.light_y, self.light_z), color=(1,1,1))
-        self.scene.mesh(self.mesh_pts, self.mesh_indices, color=(0.5, 0.2, 0.8), two_sided=True)
+        self.scene.mesh(self.mesh_pts, self.mesh_indices, per_vertex_color=self.mesh_colors, two_sided=True)
         self.canvas.scene(self.scene)
         self.window.show()
 
@@ -328,58 +399,82 @@ class PINNSSSBeam:
         # TODO: placeholder
         return None
 
-    def compute_I(self, x, parameters):
+    def compute_geom(self, x, parameters, compute_I=False):
         # TODO: consider better vectorization
-        # b0 = 10
-        # h0_min = 1  # self.h0_min
-        # b1_min = 2  # self.b1_min
-        # h1_min = 3  # self.h1_min
+        l2 = (self.s_range/2)**2
         b0 = self.b0
         h0_min = self.h0_min
         b1_min = self.b1_min
         h1_min = self.h1_min
 
-        a_h0 = parameters[:, 0:1]
-        c_h0 = parameters[:, 1:2]
+        y0_0 = parameters[:, 0:1]
+        y1_0 = parameters[:, 1:2]
 
-        a_b1 = parameters[:, 2:3]
-        c_b1 = parameters[:, 3:4]
+        y0_1 = parameters[:, 2:3]
+        y1_1 = parameters[:, 3:4]
 
-        a_h1 = parameters[:, 4:5]
-        c_h1 = parameters[:, 5:6]
+        y0_2 = parameters[:, 4:5]
+        y1_2 = parameters[:, 5:6]
 
-        parabola = (x - self.s_min) * (x - self.s_max)
-
+        parabola = x**2
         b0 = b0
-        h0 = c_h0 + a_h0 * parabola + h0_min
+        h0 = h0_min + (y1_0-y0_0) / l2 * parabola + y0_0
+        b1 = b1_min + (y1_1-y0_1) / l2 * parabola + y0_1
+        h1 = h1_min + (y1_2-y0_2) / l2 * parabola + y0_2
 
-        b1 = c_b1 + a_b1 * parabola + b1_min
-        h1 = c_h1 + a_h1 * parabola + h1_min
-
-        area0 = b0 * h0
-        area1 = b1 * h1
-        # hor_com = b0/2
-        com_vert_0 = h0 / 2
-        com_vert_1 = h0 + h1 / 2
-        weighted_areas = com_vert_0 * area0 + com_vert_1 * area1
-        total_area = area0 + area1
-        coms = weighted_areas / total_area
-        i_baseline_0 = b0 * h0**3 / 12
-        i_baseline_1 = b1 * h1**3 / 12
-        d0 = com_vert_0 - coms
-        d1 = com_vert_1 - coms
-        i_true = i_baseline_0 + area0 * d0**2 + i_baseline_1 + area1 * d1**2
-
-        # print("area0", f"{torch.min(area0).item():0.3f}", f"{torch.max(area0).item():0.3f}")
-        # print("area1", f"{torch.min(area1).item():0.3f}", f"{torch.max(area1).item():0.3f}")
-        # print("i", f"{torch.min(i_true).item():0.3f}", f"{torch.max(i_true).item():0.3f}")
-
-        return {
-            "I": i_true,
+        results = {
             "h0": h0,
             "b1": b1,
             "h1": h1,
         }
+        if compute_I:
+            area0 = b0 * h0
+            area1 = b1 * h1
+            com_vert_0 = h0 / 2
+            com_vert_1 = h0 + h1 / 2
+            weighted_areas = com_vert_0 * area0 + com_vert_1 * area1
+            total_area = area0 + area1
+            coms = weighted_areas / total_area
+            i_baseline_0 = b0 * h0**3 / 12
+            i_baseline_1 = b1 * h1**3 / 12
+            d0 = com_vert_0 - coms
+            d1 = com_vert_1 - coms
+            i_true = i_baseline_0 + area0 * d0**2 + i_baseline_1 + area1 * d1**2
+            results["I"] = i_true
+
+        return results
+    
+    def sample_extrusion(self, ct):
+        pts_rand, _ = self.sample_pts(ct, compute=False)
+        pts = torch.empty_like(pts_rand)
+        yi_0 = torch.rand((ct), device=device, requires_grad=True)*self.y_range + self.y_min
+        yi_1 = torch.rand((ct), device=device, requires_grad=True)*self.y_range + self.y_min
+        yi_2 = torch.rand((ct), device=device, requires_grad=True)*self.y_range + self.y_min
+        pts[:, self.loc_start_ix] = pts_rand[:,self.loc_start_ix]
+        pts[:,self.geo_params_start_ix+0] = yi_0
+        pts[:,self.geo_params_start_ix+1] = yi_0
+        pts[:,self.geo_params_start_ix+2] = yi_1
+        pts[:,self.geo_params_start_ix+3] = yi_1
+        pts[:,self.geo_params_start_ix+4] = yi_2
+        pts[:,self.geo_params_start_ix+5] = yi_2
+
+        results = self.governing_eq(pts)
+
+        M_pred = results["EIw_xx"]
+        w_pred = results["w"]
+        I = results["I"]
+        x_rel = results["x_rel"]
+        f = results["f"]
+        M_true = results["M_true"]
+        L = self.s_range
+        # qx(L^3 - 2Lx^2 + x^3 / (24EI)
+        w_true = f*x_rel*(L**3 - 2*L*x_rel**2 + x_rel**3) / (24 * self.E * I)
+        data_pred = torch.vstack([M_pred, w_pred])
+        data_true = torch.vstack([M_true, w_true])
+        err = data_pred-data_true
+        err2 = err**2
+
+        return pts, results, err, err2
 
     def sample_pts(self, ct, compute=True):
         pts_rand = torch.rand((ct, self.dim), device=device, requires_grad=True)
@@ -388,16 +483,15 @@ class PINNSSSBeam:
         x = x_rand * self.s_range + self.s_min
         geo_params = torch.empty_like(geo_params_rand)
         geo_params[:, 0::2] = (
-            # geo_params_rand[:, 0::2] * 1 - 0.5
-            geo_params_rand[:, 0::2] * self.a_range + self.a_min
-        )  # TODO: parameterize these and check bounds - no negs allowed!!
-        geo_params[:, 1::2] = geo_params_rand[:, 1::2] * 0 - 0
+            geo_params_rand[:, 0::2] * self.y_range + self.y_min
+        )  
+        geo_params[:, 1::2] = geo_params_rand[:, 1::2] * self.y_range +self.y_min
         pts = torch.hstack([x, geo_params])
         results = self.governing_eq(pts) if compute else None
         return pts, results
 
     def sample_collocation_adaptive(self):
-        initial_ct = self.collocation_ct * 10
+        initial_ct = self.collocation_ct * 2
         pts, results = self.sample_pts(initial_ct, compute=True)
         r2 = results["r2"]
         e_r2 = torch.mean(r2)
@@ -418,22 +512,50 @@ class PINNSSSBeam:
         pts_rand, _ = self.sample_pts(self.bc_ct, compute=False)
         pts = torch.empty_like(pts_rand)
         half = int(self.bc_ct / 2)
-        # force half the points to the left edge
-        pts[:half, self.loc_start_ix : self.geo_params_start_ix] = (
-            pts_rand[:half, self.loc_start_ix : self.geo_params_start_ix] * 0
+        quarter = int(self.bc_ct / 4)
+        # first quarter of points use the min location
+        pts[:quarter, self.loc_start_ix : self.geo_params_start_ix] = (
+            pts_rand[:quarter, self.loc_start_ix : self.geo_params_start_ix] * 0
             + self.s_min
         )
-        # force half the points to the right edge
-        pts[half:, self.loc_start_ix : self.geo_params_start_ix] = (
-            pts_rand[half:, self.loc_start_ix : self.geo_params_start_ix] * 0
+        # first quarter of points use the sampled geo params from first quarter
+        pts[:quarter, self.geo_params_start_ix : self.end_ix] = (
+            pts_rand[:quarter, self.geo_params_start_ix : self.end_ix]
+        )
+        # second quarter of points use the max location
+        pts[quarter:half, self.loc_start_ix : self.geo_params_start_ix] = (
+            pts_rand[quarter:half, self.loc_start_ix : self.geo_params_start_ix] * 0
             + self.s_max
         )
+        # second quarter of points use the sampled geo params from first quarter
+        pts[quarter:half, self.geo_params_start_ix : self.end_ix] = (
+            pts_rand[:quarter, self.geo_params_start_ix : self.end_ix]
+        )
+        # third quarter of points use the min location
+        pts[half:(half+quarter), self.loc_start_ix : self.geo_params_start_ix] = (
+            pts_rand[half:(half+quarter), self.loc_start_ix : self.geo_params_start_ix] * 0
+            + self.s_min
+        )
+        # third quarter of points use the sampled geo params from third quarter
+        pts[half:(half+quarter), self.geo_params_start_ix : self.end_ix] = (
+            pts_rand[half:(half+quarter), self.geo_params_start_ix : self.end_ix]
+        )
+        #final quarter uses max location
+        pts[(half+quarter):, self.loc_start_ix : self.geo_params_start_ix] = (
+            pts_rand[(half+quarter):, self.loc_start_ix : self.geo_params_start_ix] * 0
+            + self.s_max
+        )
+        # final quarter of points use the sampled geo params from third quarter
+        pts[(half+quarter):, self.geo_params_start_ix : self.end_ix] = (
+            pts_rand[half:(half+quarter), self.geo_params_start_ix : self.end_ix]
+        )
+
 
         results = self.governing_eq(pts)
         return pts, results
 
     def euler_bernoulli(self, pts, w):
-        x = self.extract_loc_ix(pts)
+        x = self.extract_loc_ix(pts) 
         geo_params = self.extract_geo_params_ix(pts)
         w_grad = torch.autograd.grad(
             inputs=pts,
@@ -455,7 +577,7 @@ class PINNSSSBeam:
 
         w_xx = self.extract_loc_ix(w_x_grad)
 
-        I_results = self.compute_I(x, geo_params)
+        I_results = self.compute_geom(x, geo_params, compute_I=True)
         I = I_results["I"]
         EIw_xx = self.E * I * w_xx
 
@@ -493,14 +615,27 @@ class PINNSSSBeam:
 
     def governing_eq(self, pts):
         """Predict"""
-        w = self.net(pts)
+        w = self.net(pts)*4 + 4 # TODO: parameterize this normalization, and normalize inputs
         results = self.euler_bernoulli(pts, w)
         x = results["x"]
+
         f = self.force_fn(x=x, force_params=None)
+        results["f"] = f
+
         residual = results["EIw_xxxx"] - f
         r2 = residual**2
         results["residual"] = residual
         results["r2"] = r2
+
+        L = self.s_range
+        x_rel = x-self.s_min
+        results["x_rel"] = x_rel
+
+        # M = qx(L-x)/2
+        M_true = -f*x_rel*(L - x_rel) / 2
+        results["M_true"] = M_true
+
+        results["M_err2"] = (M_true - results["EIw_xx"])**2
 
         return results
 
@@ -508,35 +643,44 @@ class PINNSSSBeam:
         """Reset grads"""
         self.adam.zero_grad()
 
-        """Sample pts"""
+        """Phys"""
         pts_col, results_col = (
             self.sample_collocation_adaptive()
             if self.adaptive_resample
             else self.sample_collocation_non_adaptive()
         )
+
+
+        loss_physics = torch.mean(results_col["r2"]) 
+        loss_moment = torch.mean(results_col["M_err2"])
+
+        """BCS"""
         pts_bc, results_bc = self.sample_bcs()
 
-        loss_physics = torch.mean(results_col["r2"])
-
         bc_w = results_bc["w"]
-        bc_w_xx = results_bc["w_xx"]
+        bc_w_xx = results_bc["EIw_xx"]
         bc_pred = torch.vstack([bc_w, bc_w_xx])
-        # bc_true = torch.zeros_like(bc_pred)
         loss_bc = torch.mean(
             bc_pred**2
         )  # simply supported - no vertical displacement, no moment
 
+        """Data"""
+        # TODO: move loss calcs into samplers
+        # pts_extrude, results_extrude, err, err2 = self.sample_extrusion(5000)
+        # loss_extrude = torch.mean(err2)*0.1
+        # loss_extrude = 0
+
         """Loss"""
         if self.soft_adapt_weights:
             with torch.no_grad():
-                losses = torch.hstack([loss_bc, loss_physics])
+                losses = torch.hstack([loss_bc, loss_physics, loss_moment])
                 top = torch.exp(self.lambda_Temp * (self.losses_prev - losses))
                 lambdas = top / torch.sum(top)
                 self.losses_prev = losses
-            loss = torch.sum(lambdas * torch.hstack([loss_bc, loss_physics]))
+            loss = torch.sum(lambdas * torch.hstack([loss_bc, loss_physics, loss_moment]))
             loss.backward()
         else:
-            loss = self.bc_weight * loss_bc + self.phys_weight * loss_physics
+            loss = self.bc_weight * loss_bc + self.phys_weight * loss_physics + self.moment_weight * loss_moment #+ self.extrude_weight * loss_extrude
             loss.backward()
 
         """Reporting/Saving etc"""
@@ -545,90 +689,19 @@ class PINNSSSBeam:
 
         if self.it % self.reporting_frequency == 0:
             print(
-                "\n BC / PDE / Weighted",
-                loss_bc.item(),
-                loss_physics.item(),
-                loss.item(),
+                "\n" ,
+                f"BC: {loss_bc.item():0.4f}",
+                f"PDE {loss_physics.item():0.4f}",
+                f"MOM {loss_moment.item():0.4f}",
+                # f"EX: {loss_extrude.item():0.4f}",
+                f"TOT: {loss.item():0.4f}",
             )
+
+        self.handle_gui()
+        self.render_scene()
 
         if self.it % self.plot_frequency == 0:
-            for i in range(500):
-            # while pinn.window.running:
-                self.handle_gui()
-                self.render_scene()
-            n_pts = self.mesh_pts_per_edge
-            n_alphas = 1
-            x = torch.linspace(self.s_min, self.s_max, n_pts, device=device).reshape(
-                -1, 1
-            )
-            geo_params = torch.tile(
-                torch.Tensor([self.render_a_h0, 0, self.render_a_b1, 0, self.render_a_h1, 0]).to(device), (n_pts, 1)
-            )
-            pts = torch.hstack([x, geo_params])
-            pts_flat = pts.reshape(-1, 7)
-
-            with torch.no_grad():
-                w = self.net(pts_flat).reshape(n_pts, n_alphas, 1)
-                I_results = self.compute_I(x=x, parameters=geo_params)
-                I = I_results["I"].reshape(n_pts, n_alphas, 1)
-                h0 = I_results["h0"].reshape(n_pts, n_alphas, 1)
-                b1 = I_results["b1"].reshape(n_pts, n_alphas, 1)
-                h1 = I_results["h1"].reshape(n_pts, n_alphas, 1)
-                f = self.force_fn(x=x, force_params=None).reshape(n_pts, n_alphas, 1)
-
-            for i in range(4):
-                self.axs[i].clear()
-            self.axs[0].set_aspect("equal")
-
-            for i in range(n_alphas):
-                self.axs[0].plot(
-                    x.flatten().cpu(), w[:, i, :].flatten().cpu(), label=f"a={i}", lw=1
-                )
-
-            for i in range(n_alphas):
-                self.axs[1].plot(
-                    x.flatten().cpu(), I[:, i, :].flatten().cpu(), label=f"a={i}", lw=1
-                )
-
-            for i in range(n_alphas):
-                self.axs[2].plot(
-                    x.flatten().cpu(), f[:, i, :].flatten().cpu(), label=f"a={i}", lw=1
-                )
-
-            for i in range(n_alphas):
-                self.axs[3].plot(
-                    x.flatten().cpu(), h0[:, i, :].flatten().cpu(), label=f"h0", lw=1
-                )
-                self.axs[3].plot(
-                    x.flatten().cpu(), b1[:, i, :].flatten().cpu(), label=f"b1", lw=1
-                )
-                self.axs[3].plot(
-                    x.flatten().cpu(), h1[:, i, :].flatten().cpu(), label=f"h1", lw=1
-                )
-
-            self.axs[0].set_title("Displacement")
-            self.axs[0].set_ylim([-0.5, 0.1])
-            self.axs[1].set_title("Moment of Inertia")
-            self.axs[1].set_ylim([-1, 40])
-            self.axs[2].set_title("Applied Force")
-            self.axs[2].set_ylim([-5, 5])
-            self.axs[3].set_title("Geo Dimensions")
-            self.axs[3].set_ylim([-1, 5])
-
-            for i in range(4):
-                self.axs[i].legend()
-                self.axs[i].plot(
-                    [self.s_min, self.s_min], [-100, 100], "--", c="gray", lw=0.5
-                )
-                self.axs[i].plot(
-                    [self.s_max, self.s_max], [-100, 100], "--", c="gray", lw=0.5
-                )
-                self.axs[i].plot(
-                    [self.s_min, self.s_max], [0, 0], "--", c="gray", lw=0.5
-                )
-            self.fig.tight_layout()
-            self.fig.canvas.flush_events()
-            self.fig.canvas.draw()
+            self.plot()
 
         self.it = self.it + 1
 
@@ -644,12 +717,18 @@ class PINNSSSBeam:
         plot_frequency=None,
         phys_weight=None,
         bc_weight=None,
+        moment_weight=None,
+        extrude_weight=None,
     ):
         """Update Params"""
         if phys_weight is not None:
             self.phys_weight = phys_weight
         if bc_weight is not None:
             self.bc_weight = bc_weight
+        if moment_weight is not None:
+            self.moment_weight = moment_weight
+        if extrude_weight is not None:
+            self.extrude_weight = extrude_weight
         if reporting_frequency is not None:
             self.reporting_frequency = reporting_frequency
         if plot_frequency is not None:
@@ -657,24 +736,109 @@ class PINNSSSBeam:
 
         for it in tqdm(range(n_epochs)):
             loss = self.adam.step(self.train_step)
+    
+    def plot(self):
+        n_pts = self.mesh_pts_per_edge
+        x = torch.linspace(self.s_min, self.s_max, n_pts, device=device, requires_grad=True).reshape(
+            -1, 1
+        )
+        geo_params = torch.tile(
+            torch.Tensor([
+                self.render_y0_0, 
+                self.render_y1_0, 
+                self.render_y0_1, 
+                self.render_y1_1, 
+                self.render_y0_2, 
+                self.render_y1_2,
+            ]).to(device), (n_pts, 1)
+        )
+        pts = torch.hstack([x, geo_params])
+        pts_flat = pts.reshape(-1, 7)
+
+        results = self.governing_eq(pts_flat)
+        w = results["w"].flatten().detach()
+        self.mesh_d.from_torch(w)
+        self.update_mesh_colors()
+        w = w.cpu()
+        M_true = results["M_true"].flatten().detach().cpu()
+        M_pred = results["EIw_xx"].flatten().detach().cpu()
+        I = results["I"].flatten().detach().cpu()
+        h0 = results["h0"].flatten().detach().cpu()
+        b1 = results["b1"].flatten().detach().cpu()
+        h1 = results["h1"].flatten().detach().cpu()
+        f_true = results["f"].flatten().detach().cpu()
+        f_pred = results["EIw_xxxx"].flatten().detach().cpu()
+        x = x.detach().flatten().cpu()
+
+        for i in range(self.n_plots):
+            self.axs[i].clear()
+
+        self.axs[0].set_ylim([-0.1,7])
+        self.axs[0].plot(
+            x, w, lw=1
+        )
+
+        self.axs[1].plot(
+            x, f_true, label=f"true", lw=1
+        )
+        self.axs[1].plot(
+            x, f_pred, label=f"predicted", lw=1
+        )
+
+        self.axs[2].plot(
+            x, M_true, label=f"true", lw=1
+        )
+        self.axs[2].plot(
+            x, M_pred, label=f"predicted", lw=1
+        )
+
+        self.axs[3].plot(
+            x, I, label=f"2nd Moment of Area", lw=1
+        )
+
+
+        self.axs[4].plot(
+            x, h0, label=f"h0", lw=1
+        )
+        self.axs[4].plot(
+            x, b1, label=f"b1", lw=1
+        )
+        self.axs[4].plot(
+            x, h1, label=f"h1", lw=1
+        )
+
+        self.axs[0].set_title(f"Displacement (max={torch.max(w).item():0.2f})")
+        self.axs[1].set_title("Applied Force")
+        self.axs[2].set_title("Applied Moment")
+        self.axs[3].set_title(f"Second Moment of Area (max={torch.max(I).item():0.2f})")
+        self.axs[4].set_title("Geo Dimensions")
+
+        for i in range(self.n_plots):
+            if i == 4 or i==1 or i==2:
+                self.axs[i].legend()
+            self.axs[i].set_xticks(np.arange(-10,20,10))
+            self.axs[i].grid(which="major", color='black', linestyle='--', linewidth=0.5, alpha=0.5)
+        self.fig.tight_layout()
+        self.fig.canvas.flush_events()
+        self.fig.canvas.draw()
 
 
 if __name__ == "__main__":
     MODEL_PREFIX = "SimplySupportedStaticBeam"
     ADAPTIVE_SAMPLING = False
-    ADAPTIVE_WEIGHTING = False
-    space_bounds = [-1, 1]
-    collocation_ct = 10000  # 5000
-    bc_ct = 5000  # 1000
+    ADAPTIVE_WEIGHTING = True
+    space_bounds = [-10, 10]
+    collocation_ct = 10000  
+    bc_ct = 5000 
 
     ti.init(arch=ti.gpu, default_fp=ti.f32)
     pinn = PINNSSSBeam(
         net=MLP(
             input_dim=7,
             output_dim=1,
-            hidden_layer_ct=6,
-            hidden_dim=64,
-            act=F.tanh,
+            hidden_layer_ct=4,
+            hidden_dim=128,
+            act=F.silu,
             learnable_act="SINGLE",
         ),
         lr=1e-3,
@@ -686,10 +850,6 @@ if __name__ == "__main__":
         model_prefix=MODEL_PREFIX,
     )
 
-    for i in range(10):
-    # while pinn.window.running:
-        pinn.handle_gui()
-        pinn.render_scene()
 
     # for i in range(10):
     for i in range(10):
@@ -698,17 +858,21 @@ if __name__ == "__main__":
             pinn.adam.param_groups[0]["lr"] = 1e-3
         if i == 1:
             pinn.adam.param_groups[0]["lr"] = 1e-4
-        if i == 2:
-            pinn.adam.param_groups[0]["lr"] = 5e-5
         if i == 4:
-            pinn.adam.param_groups[0]["lr"] = 1e-5
+            pinn.adam.param_groups[0]["lr"] = 5e-5
         if i == 6:
+            pinn.adam.param_groups[0]["lr"] = 1e-5
+        if i == 8:
             pinn.adam.param_groups[0]["lr"] = 5e-6
         pinn.train(
             n_epochs=1000,
             reporting_frequency=100,
             plot_frequency=20,
             phys_weight=1,
-            bc_weight=8,
+            bc_weight=1,
+            extrude_weight=0,
+            moment_weight=0.1
         )
-        # pinn.plot_bcs_and_ics(mode='error', ct=5000)
+    while pinn.window.running:
+        pinn.handle_gui()
+        pinn.render_scene()

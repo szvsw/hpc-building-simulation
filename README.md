@@ -4,7 +4,10 @@ This repository has some examples for implementing numerical methods in the cont
 
 It is very much in WIP state. Focus is currently on PINNs.  Work is mostly not in a modularized/library form yet.  Very much in the early experimentation/messy/rapid iteration mode at the moment.
 
+
 ## Physics-Informed Neural Networks
+
+![Shaped Beam PINN](./pinn/shaped-beam-controls.png)
 
 Physics-informed neural networks are a relatively new field which aims to solve PDEs by taking neural networks as a prior.  Crucially, the auto-differentiability of a neural network enables checking if the current state of the neural network satisfies the PDE by evaluating the appropriate partial derivatives at a collection of points in the domain and on the boundaries and substituting into the PDE.  By moving all terms in the PDE to one side of the equation, each sampled point yields a residual term for how close the neural network approximation is to satisfying the PDE; this residual can then be used as a loss term to be driven to zero and thus forcing the network to satisfy the PDE. For more info on PINNs, check out the original paper [here](https://www.sciencedirect.com/science/article/abs/pii/S0021999118307125) or some of the links [here](https://colab.research.google.com/drive/1jcRCk3Tpj8bGBMSuDmtd0fANlNLs_1Ay#scrollTo=fFQfGNFQxBDY).
 
