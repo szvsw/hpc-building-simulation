@@ -27,6 +27,8 @@ print(f"Using {device}")
 # TODO: figure out best size of network
 # TODO: figure out best number of points
 # TODO: improve adaptive resampling
+# TODO: store config in saved .pth and make loader
+# TODO: parameterize length
 
 
 @ti.data_oriented
